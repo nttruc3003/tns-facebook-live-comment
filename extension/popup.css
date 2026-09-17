@@ -1,0 +1,75 @@
+body {
+  font:
+    14px/1.55 system-ui,
+    sans-serif;
+  width: 350px;
+  margin: 0;
+  padding: 22px;
+  color: #20243a;
+  background: #f7f8fc;
+}
+h1 {
+  font-size: 21px;
+  margin: 0 0 8px;
+}
+label {
+  display: block;
+  margin: 12px 0;
+}
+input:not([type='checkbox']) {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 10px;
+  margin-top: 5px;
+  border: 1px solid #cbd0e0;
+  border-radius: 8px;
+  font: inherit;
+}
+button {
+  cursor: pointer;
+  width: 100%;
+  padding: 10px;
+  margin-top: 8px;
+  border: 1px solid #cbd0e0;
+  border-radius: 8px;
+  background: white;
+  font: inherit;
+}
+button.primary {
+  background: #6147d6;
+  color: white;
+  border-color: #6147d6;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.note {
+  color: #525a72;
+  font-size: 12px;
+}
+#status {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #403296;
+}
+hr {
+  border: 0;
+  border-top: 1px solid #ddd;
+  margin: 18px 0;
+}
+.consent {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.success {
+  white-space: pre-wrap;
+  padding: 12px;
+  border: 1px solid #15803d;
+  border-radius: 8px;
+  background: #eaf8ef;
+  color: #14532d;
+  font-weight: 600;
+}
