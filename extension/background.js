@@ -118,6 +118,53 @@ async function flush() {
     throw e;
   }
 }
+async function retryPending() {
+  let s = await state();
+  if (!(s.queue || []).length) {
+    await chrome.storage.local.remove('error');
+    return { recovered: 0 };
+  }
+  let recovered = 0;
+  try {
+    while ((s.queue || []).length) {
+      const before = s.queue.length;
+      await flush();
+      recovered += Math.min(20, before);
+      s = await state();
+    }
+  } catch (e) {
+    if (e.status !== 409 || !s.capture) throw e;
+    const capture = s.capture;
+    if (!video(capture.url) || s.linkedSession?.videoId !== video(capture.url))
+      throw new Error(
+        'Hàng chờ không khớp livestream đang ghép nối. Xuất JSON trước khi bỏ hàng chờ.',
+      );
+    const resumed = await request(
+      'start',
+      { url: capture.url, title: capture.title || 'Livestream từ trình duyệt' },
+      s.credential,
+      s.server,
+    );
+    const recoveryCapture = { ...capture, ...resumed, recovery: true };
+    await chrome.storage.local.set({
+      capture: recoveryCapture,
+      error: '',
+    });
+    s = await state();
+    while ((s.queue || []).length) {
+      const before = s.queue.length;
+      await flush();
+      recovered += Math.min(20, before);
+      s = await state();
+    }
+  }
+  s = await state();
+  if (s.capture?.recovery) {
+    await request('stop', { captureId: s.capture.captureId }, s.credential, s.server);
+    await chrome.storage.local.remove(['capture', 'error']);
+  }
+  return { recovered };
+}
 async function stop() {
   await chrome.storage.session.remove('selection');
   const { active } = await chrome.storage.session.get('active');
@@ -136,7 +183,7 @@ async function stop() {
     s = await state();
   }
   if (s.capture) await request('stop', { captureId: s.capture.captureId }, s.credential, s.server);
-  await chrome.storage.local.remove('capture');
+  await chrome.storage.local.remove(['capture', 'error']);
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   run(async () => {
@@ -201,7 +248,24 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       if (message.type === 'pair') {
         const s = await state();
         const server = serverOrigin(message.server);
-        if (s.capture || (s.queue || []).length) {
+        const queue = s.queue || [];
+        if (s.capture && !queue.length && s.credential && s.server === server) {
+          const remote = await request('status', {}, s.credential, s.server);
+          if (!remote.captureId) {
+            const { active } = await chrome.storage.session.get('active');
+            await chrome.storage.session.remove(['active', 'selection']);
+            if (active)
+              try {
+                await chrome.tabs.sendMessage(active.tabId, {
+                  type: 'halt',
+                  reason: 'Phiên cũ đã dừng. Có thể ghép nối livestream mới.',
+                });
+              } catch {}
+            await chrome.storage.local.remove(['capture', 'error']);
+            s.capture = null;
+          }
+        }
+        if (s.capture || queue.length) {
           if (!s.credential || s.server !== server)
             throw new Error('Dừng và gửi hết dữ liệu chờ trước khi ghép nối lại.');
           const current = await request(
@@ -247,8 +311,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         return { session: r.session };
       }
       if (message.type === 'retry') {
-        await flush();
-        return {};
+        return retryPending();
       }
       if (message.type === 'export-pending') {
         const s = await state();
@@ -283,7 +346,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         if (!s.credential || s.expires < Date.now()) throw new Error('Ghép nối extension trước.');
         if ((s.queue || []).length)
           throw new Error('Còn dữ liệu chờ. Bấm gửi lại trước khi chọn phiên mới.');
-        const tab = await chrome.tabs.get(message.tabId);
+        const [focusedTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        const requestedTab = await chrome.tabs.get(message.tabId);
+        const tab = focusedTab && video(focusedTab.url) ? focusedTab : requestedTab;
         if (video(tab.url) && (!s.linkedSession || s.linkedSession.videoId !== video(tab.url)))
           throw new Error(
             'Mã đang ghép nối thuộc video khác. Mở đúng livestream hoặc ghép nối bằng mã của phiên này.',
@@ -312,12 +377,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (!sender.tab || sender.frameId !== 0) throw new Error('Chỉ nhận từ tab đã chọn.');
     if (message.type === 'begin') {
       const { selection } = await chrome.storage.session.get('selection');
-      if (
-        !selection ||
-        selection.tabId !== sender.tab.id ||
-        selection.videoId !== video(sender.url)
-      )
-        throw new Error('Tab không khớp với tab bạn chọn.');
+      if (!selection)
+        throw new Error('Chưa lưu được tab đã chọn. Đóng bảng chọn vùng và mở extension lại.');
+      if (selection.videoId !== video(sender.url))
+        throw new Error('Video trong tab đã thay đổi. Chọn lại đúng livestream từ extension.');
+      if (selection.tabId !== sender.tab.id)
+        throw new Error('Chrome đã chọn nhầm cửa sổ. Đóng bảng này và chọn lại tab livestream.');
       const s = await state();
       if (s.capture || (s.queue || []).length)
         throw new Error('Phiên trước chưa kết thúc. Dừng và xử lý hàng chờ trước.');

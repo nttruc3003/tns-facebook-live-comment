@@ -19,7 +19,9 @@ try {
   const check = new Database(resolve(source), { readonly: true, fileMustExist: true });
   try {
     if (
-      ![1, 2, 3, 4, 5, 6].includes(check.pragma('user_version', { simple: true }) as number) ||
+      ![1, 2, 3, 4, 5, 6, 7, 8].includes(
+        check.pragma('user_version', { simple: true }) as number,
+      ) ||
       check.pragma('integrity_check', { simple: true }) !== 'ok'
     )
       throw new Error('Backup không đúng phiên bản hoặc lỗi integrity.');

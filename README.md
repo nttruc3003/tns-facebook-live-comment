@@ -6,13 +6,33 @@
 
 Khuyến nghị Node.js 24 LTS. Bản đầu cũng được kiểm thử với Node 20.16; nên dùng Node LTS còn được hỗ trợ khi vận hành lâu dài.
 
+### Chạy lần đầu
+
 ```sh
+cd /Users/franknguyen/teamnailsupplyllc/tns-facebook-live-comment
+cp .env.example .env
 npm ci
 npm run build
 npm start
 ```
 
 Mở **http://localhost:3210**. Terminal in mã thiết lập để tạo admin đầu tiên. Không có tài khoản/mật khẩu mặc định. Mã đổi mỗi lần khởi động nếu chưa thiết lập. Giữ mã riêng cho người quản lý máy chủ.
+
+### Những lần chạy sau
+
+```sh
+cd /Users/franknguyen/teamnailsupplyllc/tns-facebook-live-comment
+npm start
+```
+
+### Chế độ phát triển
+
+```sh
+npm run build
+npm run dev
+```
+
+Lệnh `dev` theo dõi thay đổi của backend và phục vụ frontend đã build. Sau khi sửa frontend, chạy lại `npm run build`.
 
 Trong Tổng quan, chọn **Khám phá với dữ liệu demo** để thử comment, mốc bắt đầu/kết thúc, đếm người và lịch sử. Demo là dữ liệu tĩnh, được đánh dấu rõ; không phải Facebook live.
 
@@ -63,7 +83,7 @@ Không cần Meta App ID/Secret hay callback Facebook OAuth. Không tự động
 
    **Một video Facebook = một lịch sử comment.** Dừng rồi ghi lại cùng video sẽ tiếp tục lịch sử đó; video khác được lưu riêng. Các lượt ghi có mã phiên riêng để từ chối dữ liệu đến muộn từ lượt trước. Đây không phải chức năng chia mỗi lượt ghi thành một lịch sử độc lập; vòng gameshow dùng mốc Bắt Đầu/Kết Thúc.
 
-   Khi cập nhật extension: dừng ghi và gửi hết hàng chờ trước, tải lại TNS tại trang Extensions của Chrome rồi tải lại tab Facebook và Studio. Phiên bản extension hiện tại: **0.4.2**. Popup luôn hiện livestream đang ghép nối; Studio dùng heartbeat nền để phân biệt thiết bị đang kết nối và ngoại tuyến. Dán lại đúng mã của phiên đang ghi chỉ xác nhận trạng thái, không thay credential hoặc làm mất hàng chờ. Kết nối cũ chưa gắn video cần ghép nối bằng mã của phiên; lịch sử comment được giữ nguyên.
+   Khi cập nhật extension: dừng ghi và gửi hết hàng chờ trước, tải lại TNS tại trang Extensions của Chrome rồi tải lại tab Facebook và Studio. Phiên bản extension hiện tại: **0.4.3**. Popup luôn hiện livestream đang ghép nối; Studio dùng heartbeat nền để phân biệt thiết bị đang kết nối và ngoại tuyến. Dán lại đúng mã của phiên đang ghi chỉ xác nhận trạng thái, không thay credential hoặc làm mất hàng chờ. Khi đổi livestream, extension tự giải phóng capture cũ nếu server xác nhận phiên đã dừng và không có hàng chờ; nếu còn dữ liệu chưa gửi thì vẫn yêu cầu xử lý trước. Kết nối cũ chưa gắn video cần ghép nối bằng mã của phiên; lịch sử comment được giữ nguyên.
 
 4. Đăng nhập Facebook trực tiếp trong trình duyệt. Mở video riêng qua `/videos/ID` hoặc `watch?v=ID`. Không dùng news feed hoặc link `/share/…`.
 5. Ngay trên tab đó, bấm extension, xác nhận quyền thu thập, chọn **Chọn tab này & vùng comment**. Bấm một comment mẫu; kiểm tra vùng viền tím và mẫu tên/nội dung. Nếu mẫu bị sai hoặc chứa bài viết khác, không bắt đầu. Chọn lại vùng hoặc báo lỗi giao diện.
@@ -97,17 +117,38 @@ Chỉ dùng khi có quyền thu thập phù hợp; sở hữu Page/đăng nhập
 
 Luồng Graph API cũ còn trong source để bảo toàn lịch sử/khả năng bảo trì, nhưng đã bỏ khỏi giao diện và collector mặc định bị tắt. Không cần cấu hình các biến FACEBOOK_*.
 
+## AI autofill số trong comment
+
+Trong livestream → **Filter comments**, chọn mốc bắt đầu/kết thúc và lọc cột nếu cần, rồi bấm **AI autofill**. Chọn 10 hoặc 20 comment mỗi nhóm (mặc định 20). Danh sách được chốt lúc bấm; từng nhóm gửi ID/nội dung comment đến nhà cung cấp đã lưu (OpenAI hoặc Claude) từ máy chủ, kết quả tự hiện trong bảng và tự lưu. Cần admin cấu hình provider **OpenAI** hoặc **Anthropic / Claude**, model hỗ trợ Structured Outputs và API key ở Cài đặt.
+
+Bảng và CSV có 3 cột từ **1st number** đến **3rd number**. AI lấy tối đa 3 số nguyên viết bằng chữ số theo thứ tự xuất hiện, giữ số 0 đầu: `em chọn 05 và 27` chỉ điền `05`, `27`; cột còn lại để trống. Các comment chỉ gồm danh sách như `5v6`, `5 và 6`, `3,4` được hiểu là các số riêng; dấu phẩy trong dạng này là dấu phân cách, không phải dấu thập phân. Không có số thì để trống. Nội dung mơ hồ như giá tiền, số điện thoại, số âm/thập phân được yêu cầu để trống và đánh dấu kiểm tra; hơn 3 số lấy 3 số đầu và đánh dấu. AI có thể sai: vẫn cho sửa cả 3 cột và bấm **Save** để lưu phần sửa tay.
+
+Nếu AI trả số sai định dạng, không có nguyên dạng hoặc sai thứ tự trong comment, phần mềm bỏ toàn bộ số AI của riêng comment đó và ghi cảnh báo để kiểm tra; các comment hợp lệ trong nhóm vẫn được lưu. Response sai cấu trúc hoặc thiếu/trùng/sai ID vẫn dừng nhóm để tránh gán nhầm kết quả.
+
+AI chỉ điền ô trống, giữ số đã có và các ô đang sửa. Comment bị sửa hoặc được lưu số thủ công trong lúc chờ AI sẽ được bỏ qua. **Dừng** hoàn tất nhóm đang chạy rồi dừng; **Tiếp tục** chạy phần chưa hoàn tất của danh sách ban đầu. Lỗi ở một nhóm giữ nguyên kết quả các nhóm trước; lỗi 429/5xx được thử lại tối đa hai lần. Rời livestream dừng gửi nhóm tiếp theo, nhưng nhóm đang gửi vẫn có thể hoàn tất và lưu.
+
+Nút **AI điền dòng còn trống (N)** chỉ gửi N comment đang lọc có cả ba ô số trống, tính cả sửa tay chưa lưu. Dòng có một hoặc hai số không bị gửi lại. Comment đã xử lý nhưng vẫn không có số có thể được gửi lại bằng nút này. Nút **AI autofill** vẫn xử lý toàn bộ vùng lọc.
+
+Nút **Xóa số trong vùng lọc (N)** xóa ba cột số và cảnh báo AI của đúng N comment đang khớp khoảng mốc và các bộ lọc cột, bao gồm phần sửa tay chưa lưu. Nội dung comment và lịch sử gọi AI giữ nguyên. Nút tạm khóa khi AI đang chạy hoặc đang lưu; xóa xong có thể bấm AI autofill để thử lại. Các số ngoài vùng lọc không đổi.
+
+### Lịch sử gọi AI autofill
+
+Bấm **Lịch sử gọi AI** cạnh AI autofill để xem các chunk mới nhất, mở log cũ hơn hoặc tải chi tiết thành JSON. Mỗi log ghi thời gian, provider/model, request body (gồm prompt và comment), toàn bộ response body của từng lần thử, HTTP status, request ID nếu có, lỗi và kết quả sau xử lý/giá trị đã lưu. Phản hồi gốc được tách riêng khỏi số sau khi phần mềm áp dụng quy tắc như `5v6` → `5`, `6`. Không ghi header xác thực/API key; chuỗi key nhận diện được hoặc key hiện tại bị che nếu xuất hiện trong nội dung. Admin/operator có quyền xem, viewer không có quyền. Log nằm trong database trên máy chủ, đi cùng backup; xóa livestream sẽ xóa log của livestream đó. Khi ứng dụng khởi động lại, các log chưa hoàn tất được đánh dấu gián đoạn. Chức năng chỉ ghi AI autofill từ khi được cài đặt; không khôi phục được request/response của lần chạy cũ.
+
 ## AI dùng key riêng
 
 Trong **Cài đặt → Nhà cung cấp AI**, chọn:
 
 - OpenAI, gợi ý `gpt-5.4-nano`.
+- Anthropic / Claude: chọn Claude Haiku 4.5, Sonnet 5.5 hoặc Opus 5.5; gọi trực tiếp Anthropic Messages API.
 - Gemini, gợi ý `gemini-3.1-flash-lite`.
 - OpenAI-compatible: Base URL, model và key nếu cần. Endpoint cần Chat Completions + `response_format.json_schema`. Endpoint từ xa phải HTTPS; HTTP chỉ cho loopback của máy chủ.
 
+Menu **Model** có các lựa chọn theo nhà cung cấp và **Model khác — nhập tên** cho model ID tùy chỉnh. Danh sách là preset, không xác nhận quyền truy cập của tài khoản. Chọn provider, chọn model, nhập API key tương ứng rồi bấm **Lưu cấu hình AI**. Claude dùng cùng cấu hình cho AI autofill và trợ lý tạo bộ lọc.
+
 Key chỉ ở RAM mặc định, cần nhập lại sau restart. Tùy chọn **Ghi nhớ** mã hóa AES-256-GCM vào DB. `data/master.key` nằm trên cùng máy chủ: người có cả DB và master.key vẫn giải mã được. Đây không phải OS Keychain. Key/token/Meta secret không được trả về API đọc cấu hình hoặc lưu ở localStorage. Đổi provider/Base URL không tự chuyển key cũ sang nhà cung cấp khác.
 
-AI nhận câu hỏi và tối đa 80 comment mốc/chủ live gần nhất (ID, tên, nội dung, thời gian), không nhận toàn bộ comment. UI hiển thị thông báo trước khi gửi. OpenAI đặt `store:false`; chính sách dữ liệu khác phụ thuộc provider/tài khoản. Bộ lọc trả về được kiểm tra schema và người dùng kiểm tra trước khi tính.
+Chức năng AI tạo bộ lọc nhận câu hỏi và tối đa 80 comment mốc/chủ live gần nhất (ID, tên, nội dung, thời gian), không nhận toàn bộ comment. UI hiển thị thông báo trước khi gửi. OpenAI đặt `store:false`; chính sách dữ liệu khác phụ thuộc provider/tài khoản. Bộ lọc trả về được kiểm tra schema và người dùng kiểm tra trước khi tính.
 
 AI không có quyền chạy SQL/code, đọc file hoặc sửa DB. MVP chỉ hỗ trợ exact/contains, hai mốc, đếm người/comment, bỏ chủ live và tính reply đã thu. Lọc ngữ nghĩa, regex, chọn người thắng chưa hỗ trợ. Thu thập/lọc thủ công không cần key.
 

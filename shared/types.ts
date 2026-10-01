@@ -26,6 +26,9 @@ export type Comment = {
   avatarUrl?: string | null;
   firstNumber?: string | null;
   secondNumber?: string | null;
+  thirdNumber?: string | null;
+  aiNumberNote?: string | null;
+  numbersRevision?: number;
   message: string;
   normalized: string;
   createdAt: number;
@@ -102,3 +105,7 @@ export function sanitizeBrowserComment(authorName: string, message: string) {
   lines = lines.filter((line) => !relativeFacebookTime.test(line) && !presenceLabel.test(line));
   return { authorName: cleanAuthor, message: lines.join('\n').trim() };
 }
+
+export const numberFields = ['firstNumber', 'secondNumber', 'thirdNumber'] as const;
+export type NumberField = (typeof numberFields)[number];
+export type NumberDraft = Partial<Record<NumberField, string>>;

@@ -13,7 +13,7 @@ export function openStore(directory: string) {
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
   const version = db.pragma('user_version', { simple: true }) as number;
-  if (version > 6) throw new Error('Database mới hơn phiên bản ứng dụng. Hãy nâng cấp app.');
+  if (version > 8) throw new Error('Database mới hơn phiên bản ứng dụng. Hãy nâng cấp app.');
   if (version === 0)
     db.transaction(() => {
       db.exec(`
@@ -93,6 +93,36 @@ export function openStore(directory: string) {
         PRAGMA user_version = 6;
       `);
     })();
+  if (version < 7)
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE comments ADD COLUMN thirdNumber TEXT;
+        ALTER TABLE comments ADD COLUMN fourthNumber TEXT;
+        ALTER TABLE comments ADD COLUMN fifthNumber TEXT;
+        ALTER TABLE comments ADD COLUMN aiNumberNote TEXT;
+        ALTER TABLE comments ADD COLUMN numbersRevision INTEGER NOT NULL DEFAULT 0;
+        PRAGMA user_version = 7;
+      `);
+    })();
+  if (version < 8)
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE ai_call_logs (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+          streamId TEXT NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+          userId TEXT NOT NULL, createdAt INTEGER NOT NULL, finishedAt INTEGER,
+          provider TEXT NOT NULL, model TEXT NOT NULL, commentCount INTEGER NOT NULL,
+          status TEXT NOT NULL, endpoint TEXT, requestBody TEXT, attempts TEXT NOT NULL,
+          result TEXT, error TEXT
+        );
+        CREATE INDEX ai_call_logs_stream ON ai_call_logs(streamId,seq);
+        PRAGMA user_version = 8;
+      `);
+    })();
+  // A stopped process cannot finish requests left pending in its previous run.
+  db.prepare(
+    "UPDATE ai_call_logs SET status='interrupted',finishedAt=?,error='Ứng dụng đã dừng trước khi ghi nhận kết quả cuối cùng.' WHERE status='pending'",
+  ).run(Date.now());
   return db;
 }
 export type Store = ReturnType<typeof openStore>;

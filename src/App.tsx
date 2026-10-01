@@ -1,4 +1,12 @@
-import { useEffect, useState, useCallback, useRef, type FormEvent, type ReactNode } from 'react';
+import {
+  Fragment,
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  type FormEvent,
+  type ReactNode,
+} from 'react';
 import {
   Radio,
   LayoutDashboard,
@@ -10,6 +18,7 @@ import {
   ArrowRight,
   Plus,
   Search,
+  ListFilter,
   ChevronLeft,
   Download,
   Play,
@@ -38,8 +47,14 @@ import {
 } from 'lucide-react';
 import { api, post, setCsrf, downloadBackup } from './api';
 import { CapturePanel } from './CapturePanel';
+import { AILogs } from './AILogs';
+import { autofillInChunks } from './autofill';
+import { aiModelOptions } from '../shared/ai-models';
 import {
   defaultFilter,
+  numberFields,
+  type NumberField,
+  type NumberDraft,
   type User,
   type Stream,
   type Comment,
@@ -49,7 +64,16 @@ import {
 
 type View = 'overview' | 'studio' | 'history' | 'settings';
 type Source = { id: string; name: string; kind: string };
-type CommentColumn = 'author' | 'message' | 'time' | 'first' | 'second';
+type CommentColumn = 'author' | 'message' | 'time' | NumberField;
+const numberLabels = ['1st number', '2nd number', '3rd number'];
+const emptyColumnFilters: Record<CommentColumn, string> = {
+  author: '',
+  message: '',
+  time: '',
+  firstNumber: '',
+  secondNumber: '',
+  thirdNumber: '',
+};
 const date = (n: number) =>
   new Date(n).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' });
 const time = (n: number) =>
@@ -946,17 +970,27 @@ function Studio({
   const [rangeError, setRangeError] = useState('');
   const [rangeStartId, setRangeStartId] = useState<string | null>(null);
   const [rangeEndId, setRangeEndId] = useState<string | null>(null);
-  const [rangeNumbers, setRangeNumbers] = useState<
-    Record<string, { first: string; second: string }>
-  >({});
+  const [rangeNumbers, setRangeNumbers] = useState<Record<string, NumberDraft>>({});
+  const [savingNumbers, setSavingNumbers] = useState(false);
+  const [clearingNumbers, setClearingNumbers] = useState(false);
   const [activeColumnFilter, setActiveColumnFilter] = useState<CommentColumn | null>(null);
-  const [columnFilters, setColumnFilters] = useState<Record<CommentColumn, string>>({
-    author: '',
-    message: '',
-    time: '',
-    first: '',
-    second: '',
-  });
+  const [columnFilters, setColumnFilters] = useState(emptyColumnFilters);
+  const [chunkSize, setChunkSize] = useState<10 | 20>(20);
+  const [autofilling, setAutofilling] = useState(false);
+  const [showAILogs, setShowAILogs] = useState(false);
+  const [autofillStatus, setAutofillStatus] = useState('');
+  const [autofillError, setAutofillError] = useState('');
+  const [retryIds, setRetryIds] = useState<string[]>([]);
+  const autofillJob = useRef<{ stopped: boolean } | null>(null);
+  const draftsRef = useRef(rangeNumbers);
+  draftsRef.current = rangeNumbers;
+  useEffect(
+    () => () => {
+      if (autofillJob.current) autofillJob.current.stopped = true;
+      autofillJob.current = null;
+    },
+    [live.id],
+  );
   const [q, setQ] = useState('');
   const [search, setSearch] = useState('');
   const [more, setMore] = useState<number | null>(null);
@@ -983,8 +1017,13 @@ function Studio({
     setRangeStartId(null);
     setRangeEndId(null);
     setRangeNumbers({});
+    setSavingNumbers(false);
     setActiveColumnFilter(null);
-    setColumnFilters({ author: '', message: '', time: '', first: '', second: '' });
+    setColumnFilters(emptyColumnFilters);
+    setAutofilling(false);
+    setAutofillStatus('');
+    setAutofillError('');
+    setRetryIds([]);
     setTitle('Vòng chơi 01');
   }, [live.id]);
   useEffect(() => {
@@ -1064,16 +1103,43 @@ function Studio({
     if (!markers.some((m) => m.id === c.id)) setMarkers((m) => [...m, c]);
     say(edge === 'startCommentId' ? 'Đã chọn mốc bắt đầu.' : 'Đã chọn mốc kết thúc.');
   };
-  const saveRangeNumber = (
-    comment: Comment,
-    fieldName: 'firstNumber' | 'secondNumber',
-    value: string,
-  ) =>
-    post(`/streams/${live.id}/comment-number`, {
-      commentId: comment.id,
-      field: fieldName,
-      value,
-    }).catch((error) => say(`Không lưu được số của ${comment.authorName}: ${error.message}`, true));
+  const saveRangeNumbers = async () => {
+    const drafts = rangeNumbers;
+    const items = Object.entries(drafts).map(([commentId, numbers]) => ({
+      commentId,
+      ...numbers,
+    }));
+    if (!items.length) return;
+    setSavingNumbers(true);
+    try {
+      await post(`/streams/${live.id}/comment-numbers`, { items });
+      setRangeComments((current) =>
+        current.map((comment) => {
+          const numbers = drafts[comment.id];
+          return numbers
+            ? {
+                ...comment,
+                ...Object.fromEntries(
+                  Object.entries(numbers).map(([field, value]) => [field, value.trim() || null]),
+                ),
+              }
+            : comment;
+        }),
+      );
+      setRangeNumbers((current) => {
+        const next = { ...current };
+        for (const commentId of Object.keys(drafts)) {
+          if (current[commentId] === drafts[commentId]) delete next[commentId];
+        }
+        return next;
+      });
+      say(`Đã lưu số cho ${items.length} comment.`);
+    } catch (error) {
+      say(`Không lưu được các số: ${(error as Error).message}`, true);
+    } finally {
+      setSavingNumbers(false);
+    }
+  };
   const normalizedColumnFilters = Object.fromEntries(
     Object.entries(columnFilters).map(([key, value]) => [
       key,
@@ -1081,23 +1147,109 @@ function Studio({
     ]),
   ) as Record<CommentColumn, string>;
   const visibleRangeComments = rangeComments.filter((comment) => {
-    const numbers = {
-      first: rangeNumbers[comment.id]?.first ?? comment.firstNumber ?? '',
-      second: rangeNumbers[comment.id]?.second ?? comment.secondNumber ?? '',
-    };
-    const values: Record<CommentColumn, string> = {
+    const values = {
       author: comment.authorName,
       message: comment.message,
       time: time(comment.createdAt),
-      first: numbers.first,
-      second: numbers.second,
-    };
+      ...Object.fromEntries(
+        numberFields.map((field) => [
+          field,
+          rangeNumbers[comment.id]?.[field] ?? comment[field] ?? '',
+        ]),
+      ),
+    } as Record<CommentColumn, string>;
     return (Object.keys(values) as CommentColumn[]).every(
       (key) =>
         !normalizedColumnFilters[key] ||
         values[key].toLocaleLowerCase('vi').includes(normalizedColumnFilters[key]),
     );
   });
+  const emptyNumberIds = visibleRangeComments
+    .filter((comment) =>
+      numberFields.every(
+        (field) => !(rangeNumbers[comment.id]?.[field] ?? comment[field] ?? '').trim(),
+      ),
+    )
+    .map((comment) => comment.id);
+  const clearFilteredNumbers = async () => {
+    if (clearingNumbers || savingNumbers || autofillJob.current) return;
+    const ids = new Set(visibleRangeComments.map((comment) => comment.id));
+    if (!ids.size) return;
+    setClearingNumbers(true);
+    try {
+      await post(`/streams/${live.id}/comment-numbers/clear`, { commentIds: [...ids] });
+      setRangeComments((current) =>
+        current.map((comment) =>
+          ids.has(comment.id)
+            ? {
+                ...comment,
+                firstNumber: null,
+                secondNumber: null,
+                thirdNumber: null,
+                aiNumberNote: null,
+              }
+            : comment,
+        ),
+      );
+      const next = { ...draftsRef.current };
+      for (const id of ids) delete next[id];
+      draftsRef.current = next;
+      setRangeNumbers(next);
+      setRetryIds([]);
+      setAutofillStatus('');
+      setAutofillError('');
+      say(
+        `Đã xóa số và cảnh báo AI của ${ids.size} comment trong vùng lọc. Có thể chạy AI autofill lại.`,
+      );
+    } catch (error) {
+      say(`Không xóa được số: ${(error as Error).message}`, true);
+    } finally {
+      setClearingNumbers(false);
+    }
+  };
+  const startAutofill = async (ids = visibleRangeComments.map((comment) => comment.id)) => {
+    if (autofillJob.current || !ids.length) return;
+    const job = { stopped: false };
+    autofillJob.current = job;
+    setAutofilling(true);
+    setAutofillError('');
+    setRetryIds([]);
+    setAutofillStatus(`Đã xử lý 0/${ids.length} comment`);
+    let skipped = 0;
+    const outcome = await autofillInChunks({
+      ids,
+      size: chunkSize,
+      stopped: () => job.stopped,
+      request: (chunk) =>
+        post<{ items: Comment[]; skipped: string[] }>(
+          `/streams/${live.id}/comment-numbers/autofill`,
+          {
+            items: chunk.map((commentId) => ({
+              commentId,
+              protectedFields: Object.keys(draftsRef.current[commentId] || {}),
+            })),
+          },
+        ),
+      apply: (result) => {
+        if (autofillJob.current !== job) return;
+        skipped += result.skipped.length;
+        const updated = new Map(result.items.map((comment) => [comment.id, comment]));
+        setRangeComments((current) => current.map((comment) => updated.get(comment.id) || comment));
+      },
+      progress: (done) => {
+        if (autofillJob.current === job)
+          setAutofillStatus(`Đã xử lý ${done}/${ids.length} comment · Đã tự lưu`);
+      },
+    });
+    if (autofillJob.current !== job) return;
+    autofillJob.current = null;
+    setAutofilling(false);
+    setRetryIds(outcome.remaining);
+    setAutofillError(outcome.error);
+    setAutofillStatus(
+      `${outcome.remaining.length ? 'Đã dừng' : 'Hoàn tất'}: ${outcome.done}/${ids.length} comment · Đã tự lưu${skipped ? ` · Bỏ qua ${skipped} comment vừa thay đổi` : ''}`,
+    );
+  };
   const hasColumnFilters = Object.values(columnFilters).some((value) => value.trim());
   const columnHeader = (key: CommentColumn, label: string, placeholder: string) => (
     <th className={activeColumnFilter === key || columnFilters[key] ? 'filter-active' : ''}>
@@ -1107,7 +1259,7 @@ function Studio({
         onClick={() => setActiveColumnFilter((current) => (current === key ? null : key))}
       >
         {label}
-        <Search size={11} />
+        <ListFilter size={12} aria-label={`Filter ${label}`} />
       </button>
       {activeColumnFilter === key && (
         <span className="column-filter-input">
@@ -1211,7 +1363,7 @@ function Studio({
           {live.error}
         </div>
       )}
-      <div className="studio-grid">
+      <div className={`studio-grid${commentTab === 'filter' ? ' filter-mode' : ''}`}>
         <section className="comments-panel">
           <header className="panel-heading">
             <div>
@@ -1413,24 +1565,140 @@ function Studio({
               <div className="range-help">
                 <span>
                   Dropdown chỉ hiện comment đã đánh dấu mốc trong tab Live comments. Click tiêu đề
-                  cột để lọc; số tự lưu vào database khi rời ô.
+                  cột để mở Filter. AI tự điền và lưu; sửa tay xong bấm Save ở cuối danh sách.
                 </span>
                 {hasColumnFilters && (
-                  <button
-                    onClick={() =>
-                      setColumnFilters({
-                        author: '',
-                        message: '',
-                        time: '',
-                        first: '',
-                        second: '',
-                      })
-                    }
-                  >
+                  <button onClick={() => setColumnFilters(emptyColumnFilters)}>
                     Xóa bộ lọc cột
                   </button>
                 )}
               </div>
+              {editable && (
+                <div className="autofill-controls">
+                  <div className="autofill-actions">
+                    <label>
+                      Comment mỗi nhóm
+                      <select
+                        aria-label="Comment mỗi nhóm"
+                        value={chunkSize}
+                        disabled={autofilling}
+                        onChange={(event) => setChunkSize(Number(event.target.value) as 10 | 20)}
+                      >
+                        <option value={10}>10</option>
+                        <option value={20}>20</option>
+                      </select>
+                    </label>
+                    <button
+                      className="button primary"
+                      disabled={
+                        autofilling ||
+                        savingNumbers ||
+                        clearingNumbers ||
+                        rangeLoading ||
+                        !!rangeError ||
+                        !rangeStartId ||
+                        !rangeEndId ||
+                        !visibleRangeComments.length
+                      }
+                      onClick={() => void startAutofill()}
+                    >
+                      {autofilling ? (
+                        <Loader2 size={15} className="spin" />
+                      ) : (
+                        <Sparkles size={15} />
+                      )}{' '}
+                      AI autofill
+                    </button>
+                    <button
+                      className="button secondary"
+                      disabled={
+                        autofilling ||
+                        savingNumbers ||
+                        clearingNumbers ||
+                        rangeLoading ||
+                        !!rangeError ||
+                        !rangeStartId ||
+                        !rangeEndId ||
+                        !emptyNumberIds.length
+                      }
+                      title="Chỉ gửi comment đang lọc có cả 3 ô số trống, tính cả phần sửa tay chưa lưu. Dòng có 1 hoặc 2 số cũng được giữ nguyên."
+                      onClick={() => void startAutofill(emptyNumberIds)}
+                    >
+                      <Sparkles size={15} /> AI điền dòng còn trống ({emptyNumberIds.length})
+                    </button>
+                    <button
+                      className="button secondary"
+                      disabled={
+                        autofilling ||
+                        savingNumbers ||
+                        clearingNumbers ||
+                        rangeLoading ||
+                        !!rangeError ||
+                        !rangeStartId ||
+                        !rangeEndId ||
+                        !visibleRangeComments.length
+                      }
+                      title="Xóa số ở 3 cột và cảnh báo AI của comment đang khớp bộ lọc; giữ nội dung comment và lịch sử gọi AI"
+                      onClick={() => void clearFilteredNumbers()}
+                    >
+                      {clearingNumbers ? (
+                        <Loader2 className="spin" size={15} />
+                      ) : (
+                        <Trash2 size={15} />
+                      )}
+                      Xóa số trong vùng lọc ({visibleRangeComments.length})
+                    </button>
+                    <button className="button secondary" onClick={() => setShowAILogs(true)}>
+                      <History size={15} /> Lịch sử gọi AI
+                    </button>
+                    {showAILogs && (
+                      <Modal
+                        title="Lịch sử gọi AI autofill"
+                        wide
+                        onClose={() => setShowAILogs(false)}
+                      >
+                        <AILogs streamId={live.id} />
+                      </Modal>
+                    )}
+                    {autofilling && (
+                      <button
+                        className="button secondary"
+                        onClick={() => {
+                          if (autofillJob.current) autofillJob.current.stopped = true;
+                          setAutofillStatus('Đang dừng sau nhóm hiện tại…');
+                        }}
+                      >
+                        Dừng
+                      </button>
+                    )}
+                    {!autofilling && retryIds.length > 0 && (
+                      <button
+                        className="button secondary"
+                        disabled={savingNumbers || clearingNumbers}
+                        onClick={() => void startAutofill(retryIds)}
+                      >
+                        Tiếp tục {retryIds.length} comment còn lại
+                      </button>
+                    )}
+                  </div>
+                  <small>
+                    AI autofill gửi toàn bộ {visibleRangeComments.length} comment đang lọc; AI điền
+                    dòng còn trống chỉ gửi {emptyNumberIds.length} comment chưa có số. Gửi đến nhà
+                    cung cấp AI đã lưu (OpenAI hoặc Claude). Điền tối đa 3 số theo thứ tự; có 2 số
+                    thì chỉ điền 2 cột. Giữ ô đã nhập. Số mơ hồ để bạn kiểm tra.
+                  </small>
+                  {autofillStatus && (
+                    <div role="status" aria-live="polite">
+                      {autofillStatus}
+                    </div>
+                  )}
+                  {autofillError && (
+                    <div className="notice error" role="alert">
+                      {autofillError}
+                    </div>
+                  )}
+                </div>
+              )}
               {rangeError && (
                 <div className="notice error" role="alert">
                   {rangeError}
@@ -1443,8 +1711,11 @@ function Studio({
                       {columnHeader('author', 'Tên người comment', 'Nhập tên…')}
                       {columnHeader('message', 'Comment', 'Nhập nội dung…')}
                       {columnHeader('time', 'Thời gian comment', 'Ví dụ 14:30…')}
-                      {columnHeader('first', '1st number', 'Nhập số…')}
-                      {columnHeader('second', '2nd number', 'Nhập số…')}
+                      {numberFields.map((field, index) => (
+                        <Fragment key={field}>
+                          {columnHeader(field, numberLabels[index], 'Nhập số…')}
+                        </Fragment>
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
@@ -1460,54 +1731,38 @@ function Studio({
                             <b>{c.authorName}</b>
                           </span>
                         </td>
-                        <td>{c.message || '(Bình luận không có văn bản)'}</td>
+                        <td>
+                          {c.message || '(Bình luận không có văn bản)'}
+                          {c.aiNumberNote && (
+                            <small className="ai-number-note">{c.aiNumberNote}</small>
+                          )}
+                        </td>
                         <td>
                           <time>{time(c.createdAt)}</time>
                         </td>
-                        <td className="number-cell">
-                          <input
-                            aria-label={`1st number của ${c.authorName}`}
-                            inputMode="decimal"
-                            maxLength={30}
-                            placeholder="—"
-                            disabled={!editable}
-                            value={rangeNumbers[c.id]?.first ?? c.firstNumber ?? ''}
-                            onChange={(event) =>
-                              setRangeNumbers((current) => ({
-                                ...current,
-                                [c.id]: {
-                                  first: event.target.value,
-                                  second: current[c.id]?.second ?? c.secondNumber ?? '',
-                                },
-                              }))
-                            }
-                            onBlur={(event) =>
-                              void saveRangeNumber(c, 'firstNumber', event.currentTarget.value)
-                            }
-                          />
-                        </td>
-                        <td className="number-cell">
-                          <input
-                            aria-label={`2nd number của ${c.authorName}`}
-                            inputMode="decimal"
-                            maxLength={30}
-                            placeholder="—"
-                            disabled={!editable}
-                            value={rangeNumbers[c.id]?.second ?? c.secondNumber ?? ''}
-                            onChange={(event) =>
-                              setRangeNumbers((current) => ({
-                                ...current,
-                                [c.id]: {
-                                  first: current[c.id]?.first ?? c.firstNumber ?? '',
-                                  second: event.target.value,
-                                },
-                              }))
-                            }
-                            onBlur={(event) =>
-                              void saveRangeNumber(c, 'secondNumber', event.currentTarget.value)
-                            }
-                          />
-                        </td>
+                        {numberFields.map((field, index) => (
+                          <td className="number-cell" key={field}>
+                            <input
+                              aria-label={`${numberLabels[index]} của ${c.authorName}`}
+                              inputMode="decimal"
+                              maxLength={30}
+                              placeholder="—"
+                              disabled={!editable || clearingNumbers}
+                              value={rangeNumbers[c.id]?.[field] ?? c[field] ?? ''}
+                              onChange={(event) => {
+                                const next = {
+                                  ...draftsRef.current,
+                                  [c.id]: {
+                                    ...draftsRef.current[c.id],
+                                    [field]: event.target.value,
+                                  },
+                                };
+                                draftsRef.current = next;
+                                setRangeNumbers(next);
+                              }}
+                            />
+                          </td>
+                        ))}
                       </tr>
                     ))}
                   </tbody>
@@ -1523,6 +1778,29 @@ function Studio({
                 ) : !rangeError && !visibleRangeComments.length ? (
                   <div className="inline-empty">Không có comment khớp bộ lọc cột.</div>
                 ) : null}
+                {editable && rangeComments.length > 0 && (
+                  <div className="filter-save-row">
+                    <span>
+                      {Object.keys(rangeNumbers).length
+                        ? `${Object.keys(rangeNumbers).length} hàng chưa lưu`
+                        : 'Không có thay đổi chưa lưu'}
+                    </span>
+                    <button
+                      className="button primary"
+                      disabled={
+                        savingNumbers || clearingNumbers || !Object.keys(rangeNumbers).length
+                      }
+                      onClick={() => void saveRangeNumbers()}
+                    >
+                      {savingNumbers ? (
+                        <Loader2 className="spin" size={14} />
+                      ) : (
+                        <Database size={14} />
+                      )}
+                      {savingNumbers ? 'Đang lưu…' : 'Save'}
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1926,6 +2204,7 @@ function SettingsView({
         method: 'PUT',
         body: JSON.stringify({
           ...data,
+          model: ai.model,
           baseUrl: data.baseUrl || undefined,
           apiKey: data.apiKey || undefined,
           persist: data.persist === 'on',
@@ -1993,8 +2272,9 @@ function SettingsView({
                 </Badge>
               </div>
               <div className="notice">
-                AI nhận câu hỏi và comment mốc/chủ live cần thiết để đề xuất bộ lọc. Database thực
-                hiện phép đếm. Thu thập và lọc thủ công không cần API key.
+                Nhà cung cấp và model đã lưu được dùng cho Trợ lý AI và AI autofill. Khi bấm AI
+                autofill, nội dung comment đang lọc sẽ được gửi theo từng nhóm đến nhà cung cấp đã
+                chọn.
               </div>
               <form onSubmit={saveAI}>
                 <div className="form-grid">
@@ -2003,35 +2283,65 @@ function SettingsView({
                     <select
                       name="provider"
                       value={ai.provider}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const keyInput = e.currentTarget.form?.elements.namedItem(
+                          'apiKey',
+                        ) as HTMLInputElement | null;
+                        if (keyInput) keyInput.value = '';
                         setAi({
                           ...ai,
                           provider: e.target.value,
-                          model:
-                            e.target.value === 'openai'
-                              ? 'gpt-5.4-nano'
-                              : e.target.value === 'gemini'
-                                ? 'gemini-3.1-flash-lite'
-                                : '',
+                          model: aiModelOptions[e.target.value]?.[0]?.id || '',
                           baseUrl: '',
-                        })
-                      }
+                          hasKey: false,
+                        });
+                      }}
                     >
                       <option value="openai">OpenAI</option>
+                      <option value="anthropic">Anthropic / Claude</option>
                       <option value="gemini">Google Gemini</option>
                       <option value="compatible">OpenAI-compatible</option>
                     </select>
                   </label>
                   <label>
                     Model
-                    <input
-                      name="model"
-                      required
-                      value={ai.model}
-                      onChange={(e) => setAi({ ...ai, model: e.target.value })}
-                    />
+                    <select
+                      value={
+                        (aiModelOptions[ai.provider] || []).some((model) => model.id === ai.model)
+                          ? ai.model
+                          : '__custom'
+                      }
+                      onChange={(event) =>
+                        setAi({
+                          ...ai,
+                          model: event.target.value === '__custom' ? '' : event.target.value,
+                        })
+                      }
+                    >
+                      {(aiModelOptions[ai.provider] || []).map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.label}
+                        </option>
+                      ))}
+                      <option value="__custom">Model khác — nhập tên</option>
+                    </select>
                   </label>
                 </div>
+                {!(aiModelOptions[ai.provider] || []).some((model) => model.id === ai.model) && (
+                  <label>
+                    Tên model tùy chỉnh
+                    <input
+                      required
+                      value={ai.model}
+                      placeholder="Nhập chính xác model ID"
+                      onChange={(event) => setAi({ ...ai, model: event.target.value })}
+                    />
+                  </label>
+                )}
+                <small className="field-help">
+                  Chọn model mà API key của bạn có quyền sử dụng. AI autofill hỗ trợ OpenAI và
+                  Claude; model cần hỗ trợ kết quả JSON có cấu trúc.
+                </small>
                 {ai.provider === 'compatible' && (
                   <label>
                     Base URL
@@ -2090,10 +2400,10 @@ function SettingsView({
               <div className="model-note">
                 <Zap size={18} />
                 <div>
-                  <b>Gợi ý nhanh & tiết kiệm</b>
+                  <b>Chọn model cho phiên làm việc</b>
                   <p>
-                    OpenAI: gpt-5.4-nano · Gemini: gemini-3.1-flash-lite. Có thể nhập model khác mà
-                    tài khoản của bạn hỗ trợ.
+                    Chọn OpenAI hoặc Anthropic / Claude, chọn model, nhập API key tương ứng rồi bấm
+                    Lưu cấu hình AI. Đổi nhà cung cấp cần nhập key của nhà cung cấp mới.
                   </p>
                 </div>
               </div>

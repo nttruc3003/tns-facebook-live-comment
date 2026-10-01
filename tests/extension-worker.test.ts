@@ -23,6 +23,7 @@ test('Extension worker requires explicit tab selection, persists failed uploads 
   let listener: any,
     offline = false,
     revoked = false,
+    remoteStopped = false,
     starts = 0;
   const messages: any[] = [],
     requests: any[] = [];
@@ -38,6 +39,13 @@ test('Extension worker requires explicit tab selection, persists failed uploads 
       onMessage: { addListener: (fn: any) => (listener = fn) },
     },
     tabs: {
+      query: async () => [
+        {
+          id: 8,
+          url: 'https://www.facebook.com/watch/?v=42',
+          title: 'Test Live',
+        },
+      ],
       get: async (tabId: number) => ({
         id: tabId,
         url: 'https://www.facebook.com/watch/?v=42',
@@ -61,6 +69,12 @@ test('Extension worker requires explicit tab selection, persists failed uploads 
       const path = url.split('/').at(-1),
         body = JSON.parse(options.body);
       if (path === 'batch' && offline) throw new Error('offline');
+      if (path === 'batch' && remoteStopped)
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ error: 'Phiên ghi đã dừng. Bắt đầu lại từ extension.' }),
+        };
       if (path === 'status' && revoked)
         return {
           ok: false,
@@ -77,16 +91,19 @@ test('Extension worker requires explicit tab selection, persists failed uploads 
                 session: { streamId: 'stream-id', videoId: '42', title: 'Test Live' },
               }
             : path === 'start'
-              ? { captureId: `capture-id-${++starts}`, streamId: 'stream-id' }
+              ? ((remoteStopped = false),
+                { captureId: `capture-id-${++starts}`, streamId: 'stream-id' })
               : path === 'status'
                 ? {
                     deviceId: 'device-id',
-                    captureId: `capture-id-${starts}`,
+                    captureId: remoteStopped ? null : `capture-id-${starts}`,
                     session: { streamId: 'stream-id', videoId: '42', title: 'Test Live' },
                   }
                 : path === 'batch'
                   ? { inserted: body.comments.length, accepted: body.comments.length }
-                  : { ok: true },
+                  : path === 'stop'
+                    ? ((remoteStopped = true), { ok: true })
+                    : { ok: true },
       };
     },
   });
@@ -135,11 +152,17 @@ test('Extension worker requires explicit tab selection, persists failed uploads 
   assert.ok(!JSON.stringify(exported).includes('c'.repeat(64)));
   assert.equal((await send(batch, { ...tab, tab: { id: 9 } })).ok, false);
   offline = false;
-  assert.equal((await send({ type: 'retry' })).ok, true);
+  remoteStopped = true;
+  const recovered = await send({ type: 'retry' });
+  assert.equal(recovered.ok, true);
+  assert.equal(recovered.recovered, 1);
   assert.equal(local.queue.length, 0);
-  assert.equal((await send({ type: 'stop' })).ok, true);
   assert.equal(session.active, undefined);
   assert.equal(local.capture, undefined);
+  assert.deepEqual(
+    requests.slice(-4).map((request) => request.url.split('/').at(-1)),
+    ['batch', 'start', 'batch', 'stop'],
+  );
   // The same tab/video can start a new session; late messages from the old reader are rejected.
   assert.equal((await send({ type: 'select', tabId: 8 })).ok, true);
   const second = await send({ type: 'begin' }, tab);
@@ -151,6 +174,17 @@ test('Extension worker requires explicit tab selection, persists failed uploads 
   );
   assert.equal((await chrome.storage.session.get('active')).active.captureId, second.captureId);
   assert.equal((await send({ type: 'status' })).capture.videoId, '42');
+  remoteStopped = true;
+  const switched = await send({
+    type: 'pair',
+    server: 'http://localhost:3210',
+    code: 'd'.repeat(64),
+  });
+  assert.equal(switched.ok, true);
+  assert.equal(switched.alreadyPaired, undefined);
+  assert.equal(JSON.parse(requests.at(-1).options.body).verifyOnly, undefined);
+  assert.equal(session.active, undefined);
+  assert.equal(local.capture, undefined);
   revoked = true;
   const status = await send({ type: 'status' });
   assert.equal(status.paired, false);

@@ -252,11 +252,33 @@ test('Browser capture: stable session codes, scoped ingestion, rotation, restart
     );
     const numberSaved = await app.inject({
       method: 'POST',
-      url: `/api/streams/${streamId}/comment-number`,
+      url: `/api/streams/${streamId}/comment-numbers`,
       headers: admin,
-      payload: { commentId: 'fb:2', field: 'firstNumber', value: '15' },
+      payload: {
+        items: [
+          { commentId: 'fb:2', firstNumber: '15', secondNumber: '27' },
+          { commentId: 'fb:3', firstNumber: '5', secondNumber: '' },
+        ],
+      },
     });
     assert.equal(numberSaved.statusCode, 200, numberSaved.body);
+    const savedNumbers = db
+      .prepare('SELECT firstNumber,secondNumber FROM comments WHERE streamId=? AND id=?')
+      .get(streamId, 'fb:2') as Comment;
+    assert.equal(savedNumbers.firstNumber, '15');
+    assert.equal(savedNumbers.secondNumber, '27');
+    const rejectedBatch = await app.inject({
+      method: 'POST',
+      url: `/api/streams/${streamId}/comment-numbers`,
+      headers: admin,
+      payload: {
+        items: [
+          { commentId: 'fb:2', firstNumber: '99', secondNumber: '88' },
+          { commentId: 'missing', firstNumber: '1', secondNumber: '2' },
+        ],
+      },
+    });
+    assert.equal(rejectedBatch.statusCode, 404, rejectedBatch.body);
     assert.equal(
       (
         db
@@ -465,26 +487,26 @@ test('Browser capture: stable session codes, scoped ingestion, rotation, restart
   }
 });
 
-test('v1 to v6 migration preserves comments and repairs Facebook DOM metadata artifacts', async () => {
+test('v1 to v8 migration preserves comments and repairs Facebook DOM metadata artifacts', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'tns-migration-test-'));
   let db = openStore(directory);
   try {
     seedDemo(db);
     const count = streams(db)[0].commentCount;
     db.exec(
-      'DROP TABLE capture_pairings; DROP TABLE capture_devices; ALTER TABLE comments DROP COLUMN timeBasis; ALTER TABLE comments DROP COLUMN identityBasis; ALTER TABLE comments DROP COLUMN idBasis; ALTER TABLE comments DROP COLUMN avatarUrl; ALTER TABLE comments DROP COLUMN firstNumber; ALTER TABLE comments DROP COLUMN secondNumber; PRAGMA user_version=1;',
+      'DROP TABLE capture_pairings; DROP TABLE capture_devices; ALTER TABLE comments DROP COLUMN timeBasis; ALTER TABLE comments DROP COLUMN identityBasis; ALTER TABLE comments DROP COLUMN idBasis; ALTER TABLE comments DROP COLUMN avatarUrl; ALTER TABLE comments DROP COLUMN firstNumber; ALTER TABLE comments DROP COLUMN secondNumber; ALTER TABLE comments DROP COLUMN thirdNumber; ALTER TABLE comments DROP COLUMN fourthNumber; ALTER TABLE comments DROP COLUMN fifthNumber; ALTER TABLE comments DROP COLUMN aiNumberNote; ALTER TABLE comments DROP COLUMN numbersRevision; DROP TABLE ai_call_logs; PRAGMA user_version=1;',
     );
     db.close();
     db = openStore(directory);
-    assert.equal(db.pragma('user_version', { simple: true }), 6);
+    assert.equal(db.pragma('user_version', { simple: true }), 8);
     assert.equal(streams(db)[0].commentCount, count);
     // Simulate an existing v2 installation, then apply only the additive v3 migration.
     db.exec(
-      'DROP TABLE capture_pairings; DROP INDEX capture_devices_pairing; ALTER TABLE capture_devices DROP COLUMN pairedStreamId; ALTER TABLE comments DROP COLUMN avatarUrl; ALTER TABLE comments DROP COLUMN firstNumber; ALTER TABLE comments DROP COLUMN secondNumber; PRAGMA user_version=2;',
+      'DROP TABLE capture_pairings; DROP INDEX capture_devices_pairing; ALTER TABLE capture_devices DROP COLUMN pairedStreamId; ALTER TABLE comments DROP COLUMN avatarUrl; ALTER TABLE comments DROP COLUMN firstNumber; ALTER TABLE comments DROP COLUMN secondNumber; ALTER TABLE comments DROP COLUMN thirdNumber; ALTER TABLE comments DROP COLUMN fourthNumber; ALTER TABLE comments DROP COLUMN fifthNumber; ALTER TABLE comments DROP COLUMN aiNumberNote; ALTER TABLE comments DROP COLUMN numbersRevision; DROP TABLE ai_call_logs; PRAGMA user_version=2;',
     );
     db.close();
     db = openStore(directory);
-    assert.equal(db.pragma('user_version', { simple: true }), 6);
+    assert.equal(db.pragma('user_version', { simple: true }), 8);
     assert.equal(streams(db)[0].commentCount, count);
     db.prepare(
       "INSERT INTO streams(id,sourceId,facebookId,title,pageName,status,kind,createdAt) VALUES ('browser-stream','browser','42','Live','Facebook','PAUSED','browser',?)",
@@ -493,7 +515,7 @@ test('v1 to v6 migration preserves comments and repairs Facebook DOM metadata ar
       "INSERT INTO comments(id,streamId,authorId,authorName,message,normalized,createdAt,receivedAt,parentId,isHost,timeBasis,identityBasis,idBasis) VALUES ('fb:broken','browser-stream','profile','Online status indicatorActive','Henry Trinh\n1m\nChúc mừng anh nha','old',?,?,NULL,0,'observed','profile-url','facebook-id')",
     ).run(Date.now(), Date.now());
     db.exec(
-      'ALTER TABLE comments DROP COLUMN avatarUrl; ALTER TABLE comments DROP COLUMN firstNumber; ALTER TABLE comments DROP COLUMN secondNumber; PRAGMA user_version = 3;',
+      'ALTER TABLE comments DROP COLUMN avatarUrl; ALTER TABLE comments DROP COLUMN firstNumber; ALTER TABLE comments DROP COLUMN secondNumber; ALTER TABLE comments DROP COLUMN thirdNumber; ALTER TABLE comments DROP COLUMN fourthNumber; ALTER TABLE comments DROP COLUMN fifthNumber; ALTER TABLE comments DROP COLUMN aiNumberNote; ALTER TABLE comments DROP COLUMN numbersRevision; DROP TABLE ai_call_logs; PRAGMA user_version = 3;',
     );
     db.close();
     db = openStore(directory);

@@ -20,10 +20,12 @@ import {
 import { Vault, hash, token, passwordHash, passwordMatches } from './security.js';
 import { Facebook, FacebookError } from './facebook.js';
 import { AI } from './ai.js';
+import { AutofillLog } from './ai-logs.js';
 import { captureBridgeRequest, registerCapture } from './capture.js';
 import { evaluate, recordAnalysis, commentsCsv } from './games.js';
 import {
   filterSchema,
+  numberFields,
   type User,
   type Comment,
   type Analysis,
@@ -432,24 +434,198 @@ export async function createApp(options: AppOptions) {
             ]),
       );
   });
-  app.post('/api/streams/:id/comment-number', async (req) => {
+  app.post('/api/streams/:id/comment-numbers', async (req) => {
+    requireRole(req, 'admin', 'operator');
+    const id = parseId(req);
+    if (!stream(db, id)) throw fail('Không tìm thấy livestream.', 404);
+    const value = z.string().trim().max(30).optional();
+    const data = z
+      .object({
+        items: z
+          .array(
+            z
+              .object({
+                commentId: z.string().min(1).max(200),
+                firstNumber: value,
+                secondNumber: value,
+                thirdNumber: value,
+              })
+              .strict()
+              .refine((item) => numberFields.some((field) => item[field] !== undefined)),
+          )
+          .min(1)
+          .max(5000),
+      })
+      .strict()
+      .parse(req.body);
+    db.transaction(() => {
+      for (const item of data.items) {
+        const fields = numberFields.filter((field) => item[field] !== undefined);
+        const result = db
+          .prepare(
+            `UPDATE comments SET ${fields.map((field) => `${field}=?`).join(',')},numbersRevision=numbersRevision+1 WHERE streamId=? AND id=? AND deleted=0`,
+          )
+          .run(...fields.map((field) => item[field] || null), id, item.commentId);
+        if (result.changes !== 1) throw fail('Comment không tồn tại hoặc đã bị xóa.', 404);
+      }
+    })();
+    notify('comments', id);
+    return { ok: true, updated: data.items.length };
+  });
+  app.post('/api/streams/:id/comment-numbers/clear', { bodyLimit: 1_100_000 }, async (req) => {
+    requireRole(req, 'admin', 'operator');
+    const id = parseId(req);
+    if (!stream(db, id)) throw fail('Không tìm thấy livestream.', 404);
+    const { commentIds } = z
+      .object({ commentIds: z.array(z.string().min(1).max(200)).min(1).max(5000) })
+      .strict()
+      .parse(req.body);
+    const ids = [...new Set(commentIds)];
+    const clear =
+      db.prepare(`UPDATE comments SET firstNumber=NULL,secondNumber=NULL,thirdNumber=NULL,
+      fourthNumber=NULL,fifthNumber=NULL,aiNumberNote=NULL,numbersRevision=numbersRevision+1
+      WHERE streamId=? AND id=? AND deleted=0`);
+    db.transaction(() => {
+      for (const commentId of ids) {
+        if (clear.run(id, commentId).changes !== 1)
+          throw fail(
+            'Comment không tồn tại hoặc đã bị xóa. Chưa xóa số; hãy tải lại danh sách.',
+            404,
+          );
+      }
+    })();
+    notify('comments', id);
+    return { ok: true, updated: ids.length };
+  });
+  app.get('/api/streams/:id/ai-logs', async (req) => {
+    requireRole(req, 'admin', 'operator');
+    const id = parseId(req);
+    if (!stream(db, id)) throw fail('Không tìm thấy livestream.', 404);
+    const { before } = z
+      .object({ before: z.coerce.number().int().positive().optional() })
+      .parse(req.query);
+    const rows = db
+      .prepare(
+        `SELECT seq,id,createdAt,finishedAt,provider,model,commentCount,status,error FROM ai_call_logs WHERE streamId=? AND seq<? ORDER BY seq DESC LIMIT 21`,
+      )
+      .all(id, before || Number.MAX_SAFE_INTEGER) as { seq: number }[];
+    return { items: rows.slice(0, 20), nextBefore: rows.length > 20 ? rows[19].seq : null };
+  });
+  app.get('/api/streams/:id/ai-logs/:logId', async (req) => {
+    requireRole(req, 'admin', 'operator');
+    const id = parseId(req);
+    const { logId } = z.object({ logId: z.string().uuid() }).parse(req.params);
+    const row = db
+      .prepare('SELECT * FROM ai_call_logs WHERE streamId=? AND id=?')
+      .get(id, logId) as any;
+    if (!row) throw fail('Không tìm thấy log trong livestream này.', 404);
+    return {
+      ...row,
+      attempts: JSON.parse(row.attempts),
+      result: row.result ? JSON.parse(row.result) : null,
+    };
+  });
+  const autofillStreams = new Set<string>();
+  app.post('/api/streams/:id/comment-numbers/autofill', async (req) => {
     requireRole(req, 'admin', 'operator');
     const id = parseId(req);
     if (!stream(db, id)) throw fail('Không tìm thấy livestream.', 404);
     const data = z
       .object({
-        commentId: z.string().min(1).max(200),
-        field: z.enum(['firstNumber', 'secondNumber']),
-        value: z.string().trim().max(30),
+        items: z
+          .array(
+            z
+              .object({
+                commentId: z.string().min(1).max(200),
+                protectedFields: z.array(z.enum(numberFields)).max(3).default([]),
+              })
+              .strict(),
+          )
+          .min(1)
+          .max(20),
       })
       .strict()
       .parse(req.body);
-    const result = db
-      .prepare(`UPDATE comments SET ${data.field}=? WHERE streamId=? AND id=? AND deleted=0`)
-      .run(data.value || null, id, data.commentId);
-    if (result.changes !== 1) throw fail('Comment không tồn tại hoặc đã bị xóa.', 404);
-    notify('comments', id);
-    return { ok: true, value: data.value || null };
+    if (new Set(data.items.map((item) => item.commentId)).size !== data.items.length)
+      throw fail('Danh sách comment bị trùng.');
+    if (autofillStreams.has(id))
+      throw fail('Livestream này đang xử lý AI. Hãy thử lại khi nhóm hiện tại hoàn tất.', 409);
+    const read = db.prepare('SELECT * FROM comments WHERE streamId=? AND id=? AND deleted=0');
+    const snapshots = data.items.map((item) => {
+      const comment = read.get(id, item.commentId) as Comment | undefined;
+      if (!comment) throw fail('Comment không tồn tại hoặc đã bị xóa.', 404);
+      return comment;
+    });
+    const log = new AutofillLog(db, id, req.studioUser!.id, ai.config(), snapshots.length);
+    autofillStreams.add(id);
+    try {
+      const results = await ai
+        .extractNumbers(
+          snapshots.map(({ id, message }) => ({ id, message })),
+          log,
+        )
+        .catch((error) => {
+          if (
+            error instanceof Error &&
+            (error.name === 'TimeoutError' || error.name === 'TypeError')
+          )
+            throw fail(
+              'Không kết nối được nhà cung cấp AI hoặc đã hết thời gian chờ. Hãy thử lại.',
+              408,
+            );
+          throw fail((error as Error).message);
+        });
+      const byId = new Map(results.map((item) => [item.id, item]));
+      const skipped: string[] = [];
+      const items = db.transaction(() =>
+        snapshots.flatMap((snapshot, index) => {
+          const current = read.get(id, snapshot.id) as Comment | undefined;
+          // Never apply an old response after a comment or a manual edit changes.
+          if (
+            !current ||
+            current.message !== snapshot.message ||
+            current.numbersRevision !== snapshot.numbersRevision
+          ) {
+            skipped.push(snapshot.id);
+            return [];
+          }
+          const result = byId.get(snapshot.id)!;
+          const fields = numberFields.filter(
+            (field) =>
+              !current[field]?.trim() && !data.items[index].protectedFields.includes(field),
+          );
+          const note = result.needsReview
+            ? result.reviewReason || 'Cần kiểm tra: comment có số mơ hồ hoặc nhiều hơn 3 số.'
+            : null;
+          db.prepare(
+            `UPDATE comments SET ${fields.map((field) => `${field}=?,`).join('')}aiNumberNote=? WHERE streamId=? AND id=?`,
+          ).run(
+            ...fields.map((field) => result.numbers[numberFields.indexOf(field)] || null),
+            note,
+            id,
+            snapshot.id,
+          );
+          return [read.get(id, snapshot.id) as Comment];
+        }),
+      )();
+      log.complete({
+        extracted: results,
+        saved: items.map((comment) => ({
+          commentId: comment.id,
+          ...Object.fromEntries(numberFields.map((field) => [field, comment[field] ?? null])),
+          aiNumberNote: comment.aiNumberNote,
+        })),
+        skipped,
+        protectedFields: data.items,
+      });
+      notify('comments', id);
+      return { items, skipped, logId: log.id };
+    } catch (error) {
+      log.fail((error as Error).message);
+      throw error;
+    } finally {
+      autofillStreams.delete(id);
+    }
   });
   app.get('/api/streams/:id/markers', async (req) =>
     db

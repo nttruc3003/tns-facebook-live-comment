@@ -6,7 +6,7 @@ async function init() {
     for (const b of document.querySelectorAll('button')) b.disabled = true;
     return;
   }
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   $('tab').textContent = tab?.title || 'Chọn tab livestream Facebook trước.';
   async function send(type, extra = {}) {
     const response = await chrome.runtime.sendMessage({ type, ...extra });
