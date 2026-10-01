@@ -49,6 +49,7 @@ import { api, post, setCsrf, downloadBackup } from './api';
 import { CapturePanel } from './CapturePanel';
 import { AILogs } from './AILogs';
 import { autofillInChunks } from './autofill';
+import { matchesLotto, parseLottoNumbers } from './lotto';
 import { aiModelOptions } from '../shared/ai-models';
 import {
   defaultFilter,
@@ -981,6 +982,15 @@ function Studio({
   const [autofillStatus, setAutofillStatus] = useState('');
   const [autofillError, setAutofillError] = useState('');
   const [retryIds, setRetryIds] = useState<string[]>([]);
+  const [expandedAuthorRow, setExpandedAuthorRow] = useState<string | null>(null);
+  const [lottoInput, setLottoInput] = useState('');
+  const [lottoCalled, setLottoCalled] = useState<string[]>([]);
+  const [lottoActive, setLottoActive] = useState(false);
+  const [lottoOnlyMatches, setLottoOnlyMatches] = useState(false);
+  const [lottoError, setLottoError] = useState('');
+  const [raceFirst, setRaceFirst] = useState('');
+  const [raceSecond, setRaceSecond] = useState('');
+  const [raceResult, setRaceResult] = useState<{ first: string; second: string } | null>(null);
   const autofillJob = useRef<{ stopped: boolean } | null>(null);
   const draftsRef = useRef(rangeNumbers);
   draftsRef.current = rangeNumbers;
@@ -1164,6 +1174,50 @@ function Studio({
         values[key].toLocaleLowerCase('vi').includes(normalizedColumnFilters[key]),
     );
   });
+  const matchesRace = (comment: Comment) =>
+    !!raceResult &&
+    (rangeNumbers[comment.id]?.firstNumber ?? comment.firstNumber ?? '').trim() ===
+      raceResult.first &&
+    (rangeNumbers[comment.id]?.secondNumber ?? comment.secondNumber ?? '').trim() ===
+      raceResult.second;
+  const raceMatches = raceResult ? visibleRangeComments.filter(matchesRace) : [];
+  const isLottoMatch = (comment: Comment) =>
+    lottoActive &&
+    matchesLotto(
+      numberFields.map((field) => rangeNumbers[comment.id]?.[field] ?? comment[field] ?? ''),
+      lottoCalled,
+    );
+  const lottoMatches = lottoActive ? visibleRangeComments.filter(isLottoMatch) : [];
+  const displayedRangeComments = lottoActive
+    ? [
+        ...lottoMatches,
+        ...(lottoOnlyMatches
+          ? []
+          : visibleRangeComments.filter((comment) => !isLottoMatch(comment))),
+      ]
+    : raceResult
+      ? [...raceMatches, ...visibleRangeComments.filter((comment) => !matchesRace(comment))]
+      : visibleRangeComments;
+  const addLottoNumbers = () => {
+    const values = parseLottoNumbers(lottoInput);
+    if (!values) {
+      setLottoError('Nhập số nguyên, cách nhau bằng khoảng trắng hoặc dấu phẩy.');
+      return;
+    }
+    setLottoCalled((current) => [...new Set([...current, ...values])]);
+    setLottoInput('');
+    setLottoError('');
+    setLottoActive(true);
+    setRaceResult(null);
+  };
+  const checkedAuthor = visibleRangeComments.find((comment) => comment.id === expandedAuthorRow);
+  const checkedAuthorComments = checkedAuthor
+    ? visibleRangeComments.filter((comment) =>
+        checkedAuthor.authorId
+          ? comment.authorId === checkedAuthor.authorId
+          : comment.authorName === checkedAuthor.authorName,
+      )
+    : [];
   const emptyNumberIds = visibleRangeComments
     .filter((comment) =>
       numberFields.every(
@@ -1699,6 +1753,154 @@ function Studio({
                   )}
                 </div>
               )}
+              <div className="race-controls">
+                <div className="race-actions">
+                  <label>
+                    1st
+                    <input
+                      aria-label="Kết quả đua ngựa 1st"
+                      inputMode="numeric"
+                      maxLength={30}
+                      placeholder="Ví dụ 5"
+                      value={raceFirst}
+                      onChange={(event) => setRaceFirst(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    2nd
+                    <input
+                      aria-label="Kết quả đua ngựa 2nd"
+                      inputMode="numeric"
+                      maxLength={30}
+                      placeholder="Ví dụ 6"
+                      value={raceSecond}
+                      onChange={(event) => setRaceSecond(event.target.value)}
+                    />
+                  </label>
+                  <button
+                    className="button primary"
+                    disabled={
+                      !/^[0-9]{1,30}$/.test(raceFirst.trim()) ||
+                      !/^[0-9]{1,30}$/.test(raceSecond.trim()) ||
+                      rangeLoading ||
+                      !!rangeError ||
+                      !visibleRangeComments.length
+                    }
+                    onClick={() => {
+                      setLottoActive(false);
+                      setRaceResult({ first: raceFirst.trim(), second: raceSecond.trim() });
+                    }}
+                  >
+                    <Trophy size={15} /> Đua ngựa
+                  </button>
+                  {raceResult && (
+                    <button className="button secondary" onClick={() => setRaceResult(null)}>
+                      <X size={15} /> Bỏ ưu tiên
+                    </button>
+                  )}
+                </div>
+                <small>
+                  Đưa comment trùng cả 1st và 2nd theo đúng thứ tự lên đầu; các comment khác vẫn
+                  hiển thị. Đối chiếu cả số đang sửa tay.
+                </small>
+                {raceResult && (
+                  <div role="status" aria-live="polite">
+                    Kết quả {raceResult.first} → {raceResult.second}: {raceMatches.length} comment
+                    trùng khớp trong {visibleRangeComments.length} comment đang lọc.
+                  </div>
+                )}
+              </div>
+              <div className="race-controls lotto-controls">
+                <strong>Game lotto</strong>
+                <div className="race-actions">
+                  <label>
+                    Số đã gọi
+                    <input
+                      aria-label="Số lotto đã gọi"
+                      placeholder="15 20 25 35 46 78"
+                      value={lottoInput}
+                      onChange={(event) => setLottoInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          addLottoNumbers();
+                        }
+                      }}
+                    />
+                  </label>
+                  <button
+                    className="button primary"
+                    disabled={!lottoInput.trim()}
+                    onClick={addLottoNumbers}
+                  >
+                    <Plus size={15} /> Add
+                  </button>
+                  {lottoCalled.length > 0 && (
+                    <>
+                      <button
+                        className="button secondary"
+                        onClick={() => {
+                          setLottoActive(!lottoActive);
+                          setRaceResult(null);
+                        }}
+                      >
+                        {lottoActive ? 'Bỏ ưu tiên lotto' : 'Lọc lotto'}
+                      </button>
+                      <button
+                        className="button secondary"
+                        onClick={() => {
+                          setLottoCalled([]);
+                          setLottoActive(false);
+                          setLottoError('');
+                        }}
+                      >
+                        Xóa dãy số
+                      </button>
+                    </>
+                  )}
+                </div>
+                <small>
+                  Nhập một hoặc nhiều số rồi bấm Add. Có đủ 3 số khác nhau trong dãy đã gọi thì
+                  trúng, không cần đúng thứ tự. Đối chiếu 3 cột số, kể cả sửa tay chưa lưu; 05 được
+                  tính như 5.
+                </small>
+                <div className="lotto-called">
+                  {lottoCalled.map((value) => (
+                    <button
+                      key={value}
+                      className="button secondary"
+                      aria-label={`Bỏ số lotto ${value}`}
+                      onClick={() =>
+                        setLottoCalled((current) => current.filter((number) => number !== value))
+                      }
+                    >
+                      {value} <X size={12} />
+                    </button>
+                  ))}
+                </div>
+                {lottoError && (
+                  <div className="notice error" role="alert">
+                    {lottoError}
+                  </div>
+                )}
+                {lottoActive && (
+                  <>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={lottoOnlyMatches}
+                        onChange={(event) => setLottoOnlyMatches(event.target.checked)}
+                      />{' '}
+                      Chỉ hiện comment trúng lotto
+                    </label>
+                    <div role="status" aria-live="polite">
+                      {lottoMatches.length} comment trúng lotto trong {visibleRangeComments.length}{' '}
+                      comment đang lọc.
+                      {lottoCalled.length < 3 && ' Cần ít nhất 3 số đã gọi.'}
+                    </div>
+                  </>
+                )}
+              </div>
               {rangeError && (
                 <div className="notice error" role="alert">
                   {rangeError}
@@ -1719,51 +1921,114 @@ function Studio({
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleRangeComments.map((c) => (
-                      <tr key={c.id}>
-                        <td>
-                          <span className="table-author">
-                            <Avatar
-                              name={c.authorName}
-                              url={c.avatarUrl}
-                              className={['lavender', 'peach', 'mint', 'blue-avatar'][c.seq % 4]}
-                            />
-                            <b>{c.authorName}</b>
-                          </span>
-                        </td>
-                        <td>
-                          {c.message || '(Bình luận không có văn bản)'}
-                          {c.aiNumberNote && (
-                            <small className="ai-number-note">{c.aiNumberNote}</small>
-                          )}
-                        </td>
-                        <td>
-                          <time>{time(c.createdAt)}</time>
-                        </td>
-                        {numberFields.map((field, index) => (
-                          <td className="number-cell" key={field}>
-                            <input
-                              aria-label={`${numberLabels[index]} của ${c.authorName}`}
-                              inputMode="decimal"
-                              maxLength={30}
-                              placeholder="—"
-                              disabled={!editable || clearingNumbers}
-                              value={rangeNumbers[c.id]?.[field] ?? c[field] ?? ''}
-                              onChange={(event) => {
-                                const next = {
-                                  ...draftsRef.current,
-                                  [c.id]: {
-                                    ...draftsRef.current[c.id],
-                                    [field]: event.target.value,
-                                  },
-                                };
-                                draftsRef.current = next;
-                                setRangeNumbers(next);
-                              }}
-                            />
+                    {displayedRangeComments.map((c) => (
+                      <Fragment key={c.id}>
+                        <tr
+                          className={matchesRace(c) || isLottoMatch(c) ? 'race-match' : undefined}
+                        >
+                          <td>
+                            <span className="table-author">
+                              <Avatar
+                                name={c.authorName}
+                                url={c.avatarUrl}
+                                className={['lavender', 'peach', 'mint', 'blue-avatar'][c.seq % 4]}
+                              />
+                              <b>{c.authorName}</b>
+                              <button
+                                className="author-check-button"
+                                aria-label={`Kiểm tra comment của ${c.authorName}`}
+                                aria-expanded={expandedAuthorRow === c.id}
+                                title="Xem tất cả comment của người này trong vùng lọc"
+                                onClick={() =>
+                                  setExpandedAuthorRow((current) =>
+                                    current === c.id ? null : c.id,
+                                  )
+                                }
+                              >
+                                <Check size={15} />
+                              </button>
+                              {isLottoMatch(c) && (
+                                <span className="race-match-badge">Trúng lotto</span>
+                              )}
+                              {matchesRace(c) && (
+                                <span className="race-match-badge">Trùng khớp</span>
+                              )}
+                            </span>
                           </td>
-                        ))}
-                      </tr>
+                          <td>
+                            {c.message || '(Bình luận không có văn bản)'}
+                            {c.aiNumberNote && (
+                              <small className="ai-number-note">{c.aiNumberNote}</small>
+                            )}
+                          </td>
+                          <td>
+                            <time>{time(c.createdAt)}</time>
+                          </td>
+                          {numberFields.map((field, index) => (
+                            <td className="number-cell" key={field}>
+                              <input
+                                aria-label={`${numberLabels[index]} của ${c.authorName}`}
+                                inputMode="decimal"
+                                maxLength={30}
+                                placeholder="—"
+                                disabled={!editable || clearingNumbers}
+                                value={rangeNumbers[c.id]?.[field] ?? c[field] ?? ''}
+                                onChange={(event) => {
+                                  const next = {
+                                    ...draftsRef.current,
+                                    [c.id]: {
+                                      ...draftsRef.current[c.id],
+                                      [field]: event.target.value,
+                                    },
+                                  };
+                                  draftsRef.current = next;
+                                  setRangeNumbers(next);
+                                }}
+                              />
+                            </td>
+                          ))}
+                        </tr>
+                        {expandedAuthorRow === c.id && (
+                          <tr className="author-comments-row">
+                            <td colSpan={6}>
+                              <section
+                                className="author-comments-panel"
+                                aria-label={`Comment của ${c.authorName} trong vùng lọc`}
+                              >
+                                <div className="author-comments-heading">
+                                  <strong>
+                                    {c.authorName} · {checkedAuthorComments.length} comment trong
+                                    vùng lọc
+                                  </strong>
+                                  <button
+                                    className="button secondary"
+                                    onClick={() => setExpandedAuthorRow(null)}
+                                  >
+                                    Đóng
+                                  </button>
+                                </div>
+                                {!c.authorId && (
+                                  <p className="ai-number-note">
+                                    Chưa có ID người dùng: danh sách đang nhóm theo tên, có thể gồm
+                                    người trùng tên.
+                                  </p>
+                                )}
+                                <ol className="author-comments-list">
+                                  {checkedAuthorComments.map((comment) => (
+                                    <li key={comment.id}>
+                                      <time>{time(comment.createdAt)}</time>
+                                      <span>
+                                        {comment.message || '(Bình luận không có văn bản)'}
+                                      </span>
+                                      {comment.id === c.id && <small>Comment đang kiểm tra</small>}
+                                    </li>
+                                  ))}
+                                </ol>
+                              </section>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     ))}
                   </tbody>
                 </table>
