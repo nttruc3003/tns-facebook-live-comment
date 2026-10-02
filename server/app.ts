@@ -21,6 +21,7 @@ import { Vault, hash, token, passwordHash, passwordMatches } from './security.js
 import { Facebook, FacebookError } from './facebook.js';
 import { AI } from './ai.js';
 import { AutofillLog } from './ai-logs.js';
+import { registerCaptureSources } from './capture-sources.js';
 import { captureBridgeRequest, registerCapture } from './capture.js';
 import { evaluate, recordAnalysis, commentsCsv } from './games.js';
 import {
@@ -246,6 +247,7 @@ export async function createApp(options: AppOptions) {
     return { user, csrf };
   };
   registerCapture(app, db, vault, notify, (req) => requireRole(req, 'admin', 'operator'));
+  registerCaptureSources(app, db, notify, (req) => requireRole(req, 'admin', 'operator'));
   app.get('/api/health', async () => ({ ok: true }));
   app.get('/api/auth/status', async () => ({
     needsSetup: !db.prepare('SELECT 1 FROM users LIMIT 1').get(),
@@ -646,6 +648,8 @@ export async function createApp(options: AppOptions) {
       throw fail('Luồng Graph API cũ đã tắt. Dùng extension để chọn tab livestream.');
     if (live.kind === 'browser' && data.enabled)
       throw fail('Bắt đầu ghi từ extension trên tab livestream.');
+    if (live.kind === 'browser' && !data.enabled)
+      db.prepare('UPDATE capture_sources SET enabled=0 WHERE streamId=?').run(id);
     if (data.enabled) await expectedError(() => fb.source(live.sourceId!));
     db.prepare('UPDATE streams SET collecting=?,nextPoll=0,failures=0,error=NULL WHERE id=?').run(
       data.enabled ? 1 : 0,

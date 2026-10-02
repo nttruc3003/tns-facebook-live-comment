@@ -2,65 +2,65 @@ const $ = (id) => document.getElementById(id);
 async function init() {
   if (!globalThis.chrome?.runtime?.id || !chrome.tabs) {
     $('status').textContent =
-      'Đây chỉ là file giao diện, không phải extension đang chạy. Hãy cài thư mục extension qua Chrome → Extensions → Load unpacked, sau đó bấm biểu tượng TNS trên thanh công cụ Chrome. Không mở file popup.html trực tiếp.';
-    for (const b of document.querySelectorAll('button')) b.disabled = true;
+      'Mở extension bằng biểu tượng TNS trên Chrome. Không mở file popup.html trực tiếp.';
+    for (const button of document.querySelectorAll('button')) button.disabled = true;
     return;
   }
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  $('tab').textContent = tab?.title || 'Chọn tab livestream Facebook trước.';
+  $('tab').textContent = tab?.title || 'Mở tab livestream Facebook trước.';
+  let active = false,
+    busy = false;
   async function send(type, extra = {}) {
     const response = await chrome.runtime.sendMessage({ type, ...extra });
     if (!response?.ok) throw new Error(response?.error || 'Extension chưa sẵn sàng.');
     return response;
   }
-  async function status() {
+  async function refresh() {
     const s = await send('status');
-    if (s.server) $('server').value = s.server;
+    active = s.active;
+    $('collect').textContent = active ? 'Dừng thu' : 'Collect';
+    const r = s.capture;
     $('status').textContent =
-      `${s.paired ? 'Đã ghép nối' : 'Cần ghép nối'}${s.deviceId ? ' · Thiết bị ' + s.deviceId.slice(0, 8) : ''} · ${s.active ? 'Đang ghi' : 'Đã dừng'}\n${s.session ? 'Phiên: ' + s.session.title + '\nVideo: ' + s.session.videoId + '\n' : ''}Đã lưu trong lượt ghi gần nhất: ${s.saved || 0} · Đang chờ: ${s.pending || 0}${s.error ? '\n' + s.error : ''}`;
-    if (s.paired && s.session && !s.error) {
-      $('pair-result').textContent =
-        `✓ Đã ghép nối\n${s.session.title}\nVideo: ${s.session.videoId}\n${s.active ? 'Đang ghi comment.' : 'Extension đang kết nối và sẵn sàng ghi.'}`;
-      $('pair-result').hidden = false;
-    } else $('pair-result').hidden = true;
+      `${active ? 'Đang Collect' : 'Đã dừng thu'}${r ? '\nVideo: ' + r.videoId : ''}\nĐang chờ lưu: ${s.pending || 0} · Đã đồng bộ: ${s.saved || 0}\n${r?.error || (r?.enabled ? 'Đã chọn lưu vào Studio.' : 'Chưa được chọn lưu trên website 3210.')}${s.warning ? '\n' + s.warning : ''}`;
+    $('runs').textContent = (s.runs || [])
+      .map(
+        (run) =>
+          `${run.title}: ${run.pending} chờ · ${run.saved} đã đồng bộ${run.error ? ' · ' + run.error : ''}`,
+      )
+      .join('\n');
   }
   async function action(fn) {
+    busy = true;
     for (const b of document.querySelectorAll('button')) b.disabled = true;
     try {
       await fn();
-      await status();
+      await refresh();
     } catch (e) {
       $('status').textContent = e.message;
     } finally {
+      busy = false;
       for (const b of document.querySelectorAll('button')) b.disabled = false;
     }
   }
-  $('pair').onclick = () =>
+  $('collect').onclick = () =>
     action(async () => {
-      $('pair-result').hidden = true;
-      const result = await send('pair', {
-        server: $('server').value,
-        code: $('code').value.trim(),
-      });
-      $('code').value = '';
-      $('pair-result').textContent =
-        `✓ ${result.alreadyPaired ? 'Đã ghép nối' : 'Ghép nối thành công!'}\n${result.session.title}\nVideo: ${result.session.videoId}\nMở đúng video và chọn vùng comment để bắt đầu ghi.`;
-      $('pair-result').hidden = false;
-    });
-  $('start').onclick = () =>
-    action(async () => {
-      if (!$('consent').checked) throw new Error('Xác nhận quyền thu thập trước khi tiếp tục.');
-      if (!tab?.id) throw new Error('Không tìm thấy tab.');
+      if (active) {
+        await send('stop');
+        return;
+      }
+      if (!tab?.id) throw new Error('Không tìm thấy tab livestream.');
       await send('select', { tabId: tab.id });
       window.close();
     });
-  $('stop').onclick = () => action(() => send('stop'));
   $('retry').onclick = () => action(() => send('retry'));
+  $('rename').onclick = () => action(() => send('rename', { name: $('name').value }));
   $('export').onclick = () =>
     action(async () => {
-      const r = await send('export-pending');
+      // Read in the popup context so a large export never crosses Chrome's message-size limit.
+      const { createQueue } = await import('./queue.js');
+      const data = await createQueue(indexedDB, IDBKeyRange).export();
       const url = URL.createObjectURL(
-        new Blob([JSON.stringify(r.data, null, 2)], { type: 'application/json' }),
+        new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }),
       );
       const a = document.createElement('a');
       a.href = url;
@@ -68,14 +68,11 @@ async function init() {
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     });
-  $('clear').onclick = () => {
-    if (
-      confirm(
-        'Xóa các comment CHƯA GỬI trong extension? Hãy xuất JSON trước nếu cần giữ. Comment đã lưu trong Studio không bị xóa.',
-      )
-    )
-      void action(() => send('clear-pending'));
-  };
-  await status().catch((e) => ($('status').textContent = e.message));
+  const { collectorName } = await chrome.storage.local.get('collectorName');
+  $('name').value = collectorName || '';
+  await refresh();
+  setInterval(() => {
+    if (!busy) void refresh().catch(() => {});
+  }, 2000);
 }
 await init().catch((e) => ($('status').textContent = e.message));

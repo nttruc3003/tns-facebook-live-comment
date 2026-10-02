@@ -19,7 +19,7 @@ try {
   const check = new Database(resolve(source), { readonly: true, fileMustExist: true });
   try {
     if (
-      ![1, 2, 3, 4, 5, 6, 7, 8].includes(
+      ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(
         check.pragma('user_version', { simple: true }) as number,
       ) ||
       check.pragma('integrity_check', { simple: true }) !== 'ok'
@@ -45,6 +45,8 @@ try {
   const restored = new Database(staging);
   try {
     restored.transaction(() => {
+      if ((restored.pragma('user_version', { simple: true }) as number) >= 9)
+        restored.prepare('DELETE FROM capture_installations').run();
       restored.prepare('DELETE FROM sessions').run();
       restored.prepare('DELETE FROM oauth_states').run();
       restored.prepare('DELETE FROM sources').run();

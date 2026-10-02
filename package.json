@@ -34,6 +34,7 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.7.0",
+    "fake-indexeddb": "^6.2.4",
     "prettier": "^3.6.2",
     "tsx": "^4.20.0",
     "typescript": "^5.8.3",

@@ -13,7 +13,7 @@ export function openStore(directory: string) {
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
   const version = db.pragma('user_version', { simple: true }) as number;
-  if (version > 8) throw new Error('Database mới hơn phiên bản ứng dụng. Hãy nâng cấp app.');
+  if (version > 9) throw new Error('Database mới hơn phiên bản ứng dụng. Hãy nâng cấp app.');
   if (version === 0)
     db.transaction(() => {
       db.exec(`
@@ -119,6 +119,25 @@ export function openStore(directory: string) {
         PRAGMA user_version = 8;
       `);
     })();
+  if (version < 9)
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE capture_installations (
+          id TEXT PRIMARY KEY, extensionId TEXT NOT NULL, secretHash TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL, createdAt INTEGER NOT NULL
+        );
+        CREATE TABLE capture_sources (
+          id TEXT PRIMARY KEY, deviceId TEXT NOT NULL REFERENCES capture_installations(id) ON DELETE CASCADE,
+          videoId TEXT NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL, startedAt INTEGER NOT NULL,
+          lastSeen INTEGER NOT NULL, running INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0,
+          streamId TEXT REFERENCES streams(id) ON DELETE SET NULL,
+          approvedBy TEXT REFERENCES users(id) ON DELETE SET NULL, enabled INTEGER NOT NULL DEFAULT 0,
+          ackSeq INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE UNIQUE INDEX capture_source_writer ON capture_sources(streamId) WHERE enabled=1 AND streamId IS NOT NULL;
+        PRAGMA user_version = 9;
+      `);
+    })();
   // A stopped process cannot finish requests left pending in its previous run.
   db.prepare(
     "UPDATE ai_call_logs SET status='interrupted',finishedAt=?,error='Ứng dụng đã dừng trước khi ghi nhận kết quả cuối cùng.' WHERE status='pending'",
@@ -136,7 +155,7 @@ export function setSetting(db: Store, key: string, value: string) {
     'INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
   ).run(key, value);
 }
-const streamSelect = `SELECT s.*, (SELECT count(*) FROM comments c WHERE c.streamId=s.id AND c.deleted=0) commentCount, (SELECT count(DISTINCT authorId) FROM comments c WHERE c.streamId=s.id AND c.deleted=0) participantCount FROM streams s`;
+const streamSelect = `SELECT s.*, (SELECT COALESCE(SUM(pending),0) FROM capture_sources cs WHERE cs.streamId=s.id AND cs.enabled=1) capturePending, (SELECT count(*) FROM comments c WHERE c.streamId=s.id AND c.deleted=0) commentCount, (SELECT count(DISTINCT authorId) FROM comments c WHERE c.streamId=s.id AND c.deleted=0) participantCount FROM streams s`;
 export function streams(db: Store): Stream[] {
   return db
     .prepare(

@@ -11,6 +11,8 @@ const extensionId = z.string().regex(/^[a-p]{32}$/);
 const secret = z.string().regex(/^[a-f0-9]{64}$/);
 const loopbacks = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const bridgePaths = new Set([
+  '/api/capture/bridge/announce',
+  '/api/capture/bridge/upload',
   '/api/capture/bridge/pair',
   '/api/capture/bridge/start',
   '/api/capture/bridge/batch',
@@ -365,6 +367,10 @@ export function registerCapture(
           403,
         );
       const live = { id: bound.streamId };
+      const selectedSource = db
+        .prepare('SELECT id FROM capture_sources WHERE streamId=? AND enabled=1')
+        .get(live.id);
+      if (selectedSource) throw fail('Nguồn Collect khác đang được chọn cho video này.', 409);
       const other = db
         .prepare(
           'SELECT id FROM capture_devices WHERE streamId=? AND captureId IS NOT NULL AND id!=? AND lastSeen>?',
@@ -478,7 +484,7 @@ export function registerCapture(
   const timer = setInterval(() => {
     const changed = db
       .prepare(
-        "UPDATE streams SET collecting=0,status='PAUSED',error=? WHERE kind='browser' AND collecting=1 AND lastSync<?",
+        "UPDATE streams SET collecting=0,status='PAUSED',error=? WHERE kind='browser' AND collecting=1 AND lastSync<? AND id NOT IN (SELECT streamId FROM capture_sources WHERE enabled=1 AND streamId IS NOT NULL)",
       )
       .run(warning, Date.now() - 30_000).changes;
     if (changed) notify();

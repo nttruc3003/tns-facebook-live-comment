@@ -2,202 +2,277 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
+// @ts-expect-error Native extension module also runs unchanged inside Chrome.
+import { createQueue, MAX_BYTES } from '../extension/queue.js';
+const delay = () => new Promise((resolve) => setTimeout(resolve, 10));
+async function until(fn: () => Promise<boolean>) {
+  for (let i = 0; i < 100; i++) {
+    if (await fn()) return;
+    await delay();
+  }
+  throw new Error('Timed out waiting for sync');
+}
 
-test('Extension worker requires explicit tab selection, persists failed uploads and exposes no credential to tab', async () => {
+test('IndexedDB outbox persists, deduplicates tab retries, preserves ordering and only removes acknowledged data', async () => {
+  const idb = new IDBFactory(),
+    q = createQueue(idb, IDBKeyRange);
+  await q.create({ id: 'run1', title: 'One' });
+  await q.append('run1', [
+    { id: 'fb:1', message: 'First' },
+    { id: 'fb:2', message: 'Second' },
+  ]);
+  await q.append('run1', [{ id: 'fb:1', message: 'First' }]);
+  assert.equal((await q.list())[0].nextSeq, 3);
+  // A new worker accesses the same persistent database.
+  const reopened = createQueue(idb, IDBKeyRange);
+  assert.deepEqual(
+    (await reopened.batch('run1')).map((c: any) => c.seq),
+    [1, 2],
+  );
+  await reopened.acknowledge('run1', 1);
+  assert.equal((await reopened.batch('run1'))[0].comment.id, 'fb:2');
+  await assert.rejects(reopened.acknowledge('run1', 3), /không hợp lệ/);
+  await reopened.append('run1', [{ id: 'fb:1', message: 'Retry after ACK' }]);
+  assert.equal((await reopened.list())[0].nextSeq, 3);
+  await q.create({ id: 'run2', title: 'Two' });
+  await q.append('run2', [{ id: 'fb:1', message: 'Other video' }]);
+  assert.equal((await q.batch('run2')).length, 1);
+  // Simulate a full outbox without allocating 100 MB. Failed writes roll back dedup records.
+  await q.update('run1', { bytes: MAX_BYTES });
+  await assert.rejects(q.append('run2', [{ id: 'fb:3', message: 'Full' }]), /đầy/);
+  await q.update('run1', { bytes: 0 });
+  await q.append('run2', [{ id: 'fb:3', message: 'Recovered' }]);
+  assert.equal((await q.batch('run2')).length, 2);
+});
+
+test('Collect works before server, survives failed ACKs and stops without draining or exposing credentials', async () => {
   const id = 'a'.repeat(32),
     local: Record<string, any> = {},
     session: Record<string, any> = {};
-  const area = (state: Record<string, any>) => ({
+  const indexedDB = new IDBFactory(),
+    q = createQueue(indexedDB, IDBKeyRange);
+  const area = (s: Record<string, any>) => ({
     setAccessLevel: async () => {},
     get: async (keys: string[] | string) =>
       Object.fromEntries(
         (Array.isArray(keys) ? keys : [keys])
-          .filter((k) => k in state)
-          .map((k) => [k, structuredClone(state[k])]),
+          .filter((k) => k in s)
+          .map((k) => [k, structuredClone(s[k])]),
       ),
-    set: async (data: Record<string, any>) => Object.assign(state, structuredClone(data)),
+    set: async (data: any) => Object.assign(s, structuredClone(data)),
     remove: async (keys: string | string[]) => {
-      for (const key of Array.isArray(keys) ? keys : [keys]) delete state[key];
+      for (const k of Array.isArray(keys) ? keys : [keys]) delete s[k];
     },
   });
   let listener: any,
-    offline = false,
-    revoked = false,
-    remoteStopped = false,
-    starts = 0;
-  const messages: any[] = [],
-    requests: any[] = [];
+    alarm: any,
+    offline = true,
+    enabled = false,
+    loseResponse = false,
+    ackSeq = 0;
+  const requests: any[] = [],
+    delivered: any[] = [];
+  const tab = { id: 8, url: 'https://www.facebook.com/watch/?v=42', title: 'Test live' };
   const chrome = {
     storage: { local: area(local), session: area(session) },
     alarms: {
       create: () => {},
-      onAlarm: { addListener: () => {} },
+      onAlarm: {
+        addListener: (fn: any) => {
+          alarm = fn;
+        },
+      },
     },
     runtime: {
       id,
       getURL: (path: string) => `chrome-extension://${id}/${path}`,
-      onMessage: { addListener: (fn: any) => (listener = fn) },
+      onMessage: {
+        addListener: (fn: any) => {
+          listener = fn;
+        },
+      },
     },
     tabs: {
-      query: async () => [
-        {
-          id: 8,
-          url: 'https://www.facebook.com/watch/?v=42',
-          title: 'Test Live',
-        },
-      ],
-      get: async (tabId: number) => ({
-        id: tabId,
-        url: 'https://www.facebook.com/watch/?v=42',
-        title: 'Test Live',
-      }),
+      get: async () => tab,
       sendMessage: async (_id: number, m: any) => {
-        messages.push(m);
-        return { ok: true };
+        delivered.push(m);
+        return { active: false };
       },
       onRemoved: { addListener: () => {} },
     },
     scripting: { executeScript: async () => {} },
   };
+  const source = (
+    await readFile(new URL('../extension/background.js', import.meta.url), 'utf8')
+  ).replace("import { createQueue, MAX_BYTES } from './queue.js';", '');
   const context = vm.createContext({
     chrome,
+    createQueue,
+    MAX_BYTES,
+    indexedDB,
+    IDBKeyRange,
+    TextEncoder,
+    crypto: webcrypto,
+    Uint8Array,
     URL,
     AbortSignal,
-    console,
+    setTimeout,
     fetch: async (url: string, options: any) => {
-      requests.push({ url, options });
-      const path = url.split('/').at(-1),
-        body = JSON.parse(options.body);
-      if (path === 'batch' && offline) throw new Error('offline');
-      if (path === 'batch' && remoteStopped)
+      const body = JSON.parse(options.body),
+        path = url.split('/').at(-1);
+      requests.push({ path, body, options });
+      if (offline) throw new Error('offline');
+      if (path === 'announce')
         return {
-          ok: false,
-          status: 409,
-          json: async () => ({ error: 'Phiên ghi đã dừng. Bắt đầu lại từ extension.' }),
+          ok: true,
+          json: async () => ({ enabled, ackSeq, streamId: enabled ? 'stream' : null }),
         };
-      if (path === 'status' && revoked)
-        return {
-          ok: false,
-          status: 401,
-          json: async () => ({ error: 'Ghép nối hết hạn hoặc đã thu hồi.' }),
-        };
-      return {
-        ok: true,
-        json: async () =>
-          path === 'pair'
-            ? {
-                credential: 'c'.repeat(64),
-                expires: Date.now() + 100000,
-                session: { streamId: 'stream-id', videoId: '42', title: 'Test Live' },
-              }
-            : path === 'start'
-              ? ((remoteStopped = false),
-                { captureId: `capture-id-${++starts}`, streamId: 'stream-id' })
-              : path === 'status'
-                ? {
-                    deviceId: 'device-id',
-                    captureId: remoteStopped ? null : `capture-id-${starts}`,
-                    session: { streamId: 'stream-id', videoId: '42', title: 'Test Live' },
-                  }
-                : path === 'batch'
-                  ? { inserted: body.comments.length, accepted: body.comments.length }
-                  : path === 'stop'
-                    ? ((remoteStopped = true), { ok: true })
-                    : { ok: true },
-      };
+      assert.equal(enabled, true);
+      ackSeq = Math.max(ackSeq, body.fromSeq + body.comments.length - 1);
+      if (loseResponse) {
+        loseResponse = false;
+        throw new Error('response lost');
+      }
+      return { ok: true, json: async () => ({ ackSeq }) };
     },
   });
-  vm.runInContext(
-    await readFile(new URL('../extension/background.js', import.meta.url), 'utf8'),
-    context,
-  );
+  vm.runInContext(source, context);
   const popup = { id, url: `chrome-extension://${id}/popup.html` };
-  const tab = { id, url: 'https://www.facebook.com/watch/?v=42', tab: { id: 8 }, frameId: 0 };
-  const send = (message: any, sender: any = popup) =>
-    new Promise<any>((resolve) => listener(message, sender, resolve));
-  assert.equal((await send({ type: 'begin' }, tab)).ok, false);
-  assert.equal((await send({ type: 'pair', server: 'https://evil.example', code: 'x' })).ok, false);
+  const sender = { id, url: tab.url, tab: { id: tab.id }, frameId: 0 };
+  const send = (message: any, who: any = popup) =>
+    new Promise<any>((resolve) => listener(message, who, resolve));
+  assert.equal((await send({ type: 'begin' }, sender)).ok, false);
+  assert.equal((await send({ type: 'select', tabId: 8 })).ok, true);
+  const begun = await send({ type: 'begin' }, sender);
+  assert.equal(begun.ok, true);
+  const comment = {
+    id: 'fb:1',
+    message: '05',
+    authorName: 'Name',
+    authorUrl: null,
+    parentId: null,
+    observedAt: Date.now(),
+  };
+  const batch = { type: 'batch', captureId: begun.captureId, url: tab.url, comments: [comment] };
+  assert.equal((await send({ ...batch, captureId: 'old' }, sender)).ok, false);
+  assert.equal((await send(batch, { ...sender, tab: { id: 9 } })).ok, false);
+  assert.equal((await send(batch, sender)).pending, 1);
+  await until(async () => !!(await q.list())[0].error);
+  assert.equal((await send(batch, sender)).pending, 1);
+  assert.equal((await send({ type: 'status' }, sender)).ok, false);
+  assert.equal(session.active.captureId, begun.captureId);
+  offline = false;
+  alarm({ name: 'tns-heartbeat' });
+  await until(async () => (await q.list())[0].connected === true);
+  assert.equal(requests.filter((r) => r.path === 'upload').length, 0);
+  enabled = true;
+  loseResponse = true;
+  await delay();
+  alarm({ name: 'tns-heartbeat' });
+  await until(async () => ackSeq === 1);
+  assert.equal((await q.batch(begun.captureId)).length, 1);
+  await delay();
+  alarm({ name: 'tns-heartbeat' });
+  await until(async () => (await q.batch(begun.captureId)).length === 0);
+  assert.equal((await q.list())[0].saved, 1);
+  enabled = false;
+  await delay();
+  alarm({ name: 'tns-heartbeat' });
+  await until(async () => !(await q.list())[0].enabled);
+  const second = await send({ ...batch, comments: [{ ...comment, id: 'fb:2' }] }, sender);
+  assert.equal(second.pending, 1);
+  assert.equal(session.active.captureId, begun.captureId);
   assert.equal(
-    (await send({ type: 'pair', server: 'http://localhost:3210', code: 'b'.repeat(64) })).ok,
+    (await send({ type: 'end', captureId: begun.captureId, url: tab.url }, sender)).ok,
     true,
   );
-  assert.equal((await send({ type: 'status' }, tab)).ok, false);
-  assert.equal((await send({ type: 'select', tabId: 8 })).ok, true);
-  const begun = await send({ type: 'begin' }, tab);
-  assert.equal(begun.ok, true);
-  assert.ok(!JSON.stringify(begun).includes('c'.repeat(64)));
-  const pairedAgain = await send({
-    type: 'pair',
-    server: 'http://localhost:3210',
-    code: 'b'.repeat(64),
-  });
-  assert.equal(pairedAgain.ok, true);
-  assert.equal(pairedAgain.alreadyPaired, true);
-  assert.equal(JSON.parse(requests.at(-1).options.body).verifyOnly, true);
-  offline = true;
-  const batch = {
-    type: 'batch',
-    captureId: begun.captureId,
-    url: tab.url,
-    comments: [{ id: 'fb:1', message: '5' }],
-  };
-  assert.equal((await send({ ...batch, captureId: 'previous-capture' }, tab)).ok, false);
-  assert.equal(local.queue.length, 0);
-  const queued = await send(batch, tab);
-  assert.equal(queued.ok, true);
-  assert.equal(queued.pending, 1);
-  assert.equal(local.queue.length, 1);
+  assert.equal(session.active, undefined);
+  assert.equal((await q.batch(begun.captureId)).length, 1);
   const exported = await send({ type: 'export-pending' });
   assert.equal(exported.data.comments.length, 1);
-  assert.ok(!JSON.stringify(exported).includes('c'.repeat(64)));
-  assert.equal((await send(batch, { ...tab, tab: { id: 9 } })).ok, false);
-  offline = false;
-  remoteStopped = true;
-  const recovered = await send({ type: 'retry' });
-  assert.equal(recovered.ok, true);
-  assert.equal(recovered.recovered, 1);
-  assert.equal(local.queue.length, 0);
-  assert.equal(session.active, undefined);
-  assert.equal(local.capture, undefined);
-  assert.deepEqual(
-    requests.slice(-4).map((request) => request.url.split('/').at(-1)),
-    ['batch', 'start', 'batch', 'stop'],
-  );
-  // The same tab/video can start a new session; late messages from the old reader are rejected.
+  assert.ok(!JSON.stringify(exported).includes(local.collectorCredential));
+  assert.ok(!JSON.stringify(delivered).includes(local.collectorCredential));
   assert.equal((await send({ type: 'select', tabId: 8 })).ok, true);
-  const second = await send({ type: 'begin' }, tab);
-  assert.notEqual(second.captureId, begun.captureId);
-  assert.equal((await send(batch, tab)).ok, false);
-  assert.equal(
-    (await send({ type: 'end', url: tab.url, captureId: begun.captureId }, tab)).ok,
-    false,
-  );
-  assert.equal((await chrome.storage.session.get('active')).active.captureId, second.captureId);
-  assert.equal((await send({ type: 'status' })).capture.videoId, '42');
-  remoteStopped = true;
-  const switched = await send({
-    type: 'pair',
-    server: 'http://localhost:3210',
-    code: 'd'.repeat(64),
+  const next = await send({ type: 'begin' }, sender);
+  assert.notEqual(next.captureId, begun.captureId);
+  assert.equal((await q.list()).length, 2);
+  assert.equal((await send(batch, sender)).ok, false);
+  await delay();
+});
+
+test('Upgrade migrates the legacy pending queue once before clearing old storage', async () => {
+  const indexedDB = new IDBFactory(),
+    q = createQueue(indexedDB, IDBKeyRange);
+  const capture = {
+    captureId: '12345678-1234-4234-8234-123456789abc',
+    tabId: 8,
+    url: 'https://www.facebook.com/watch/?v=42',
+    videoId: '42',
+    title: 'Old capture',
+  };
+  const original = [{ id: 'fb:9', message: 'Keep me', authorName: 'Test', observedAt: Date.now() }];
+  const local: Record<string, any> = { capture, queue: original };
+  const session: Record<string, any> = {};
+  const area = (data: Record<string, any>) => ({
+    setAccessLevel: async () => {},
+    get: async (keys: string[] | string) =>
+      Object.fromEntries(
+        (Array.isArray(keys) ? keys : [keys]).map((k) => [k, structuredClone(data[k])]),
+      ),
+    set: async (values: any) => Object.assign(data, structuredClone(values)),
+    remove: async (keys: string[]) => {
+      for (const key of keys) delete data[key];
+    },
   });
-  assert.equal(switched.ok, true);
-  assert.equal(switched.alreadyPaired, undefined);
-  assert.equal(JSON.parse(requests.at(-1).options.body).verifyOnly, undefined);
-  assert.equal(session.active, undefined);
-  assert.equal(local.capture, undefined);
-  revoked = true;
-  const status = await send({ type: 'status' });
-  assert.equal(status.paired, false);
-  assert.equal(status.active, false);
-  assert.equal(local.credential, undefined);
-  assert.equal(local.capture, undefined);
-  assert.match(status.error, /thu hồi/);
-  assert.ok(messages.every((m) => !JSON.stringify(m).includes('c'.repeat(64))));
-  assert.ok(
-    requests.every(
-      (r) =>
-        r.url.startsWith('http://localhost:3210/api/capture/bridge/') &&
-        r.options.credentials === 'omit',
-    ),
-  );
+  const source = (
+    await readFile(new URL('../extension/background.js', import.meta.url), 'utf8')
+  ).replace("import { createQueue, MAX_BYTES } from './queue.js';", '');
+  async function boot() {
+    let listener: any;
+    const id = 'a'.repeat(32);
+    const chrome = {
+      storage: { local: area(local), session: area(session) },
+      alarms: { create: () => {}, onAlarm: { addListener: () => {} } },
+      runtime: {
+        id,
+        getURL: (p: string) => `chrome-extension://${id}/${p}`,
+        onMessage: {
+          addListener: (fn: any) => {
+            listener = fn;
+          },
+        },
+      },
+      tabs: { onRemoved: { addListener: () => {} } },
+    };
+    vm.runInNewContext(source, {
+      createQueue,
+      MAX_BYTES,
+      indexedDB,
+      IDBKeyRange,
+      chrome,
+      crypto: webcrypto,
+      Uint8Array,
+      URL,
+      AbortSignal,
+      fetch: async () => {
+        throw new Error('offline');
+      },
+    });
+    const status = await new Promise<any>((resolve) =>
+      listener({ type: 'status' }, { id, url: `chrome-extension://${id}/popup.html` }, resolve),
+    );
+    assert.equal(status.ok, true, status.error);
+    await delay();
+  }
+  await boot();
+  assert.equal(local.queue, undefined);
+  assert.equal((await q.batch(capture.captureId))[0].comment.message, 'Keep me');
+  // Simulate a crash after the IndexedDB commit but before chrome.storage was cleared.
+  local.capture = capture;
+  local.queue = original;
+  await boot();
+  assert.equal((await q.list()).length, 1);
+  assert.equal((await q.batch(capture.captureId)).length, 1);
 });

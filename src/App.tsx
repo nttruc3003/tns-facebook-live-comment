@@ -729,7 +729,7 @@ export default function App() {
                   </div>
                   <h3>Sân khấu đã sẵn sàng.</h3>
                   <p>
-                    Chọn tab livestream bằng extension đã ghép nối,
+                    Bấm Collect trong extension trên tab livestream,
                     <br />
                     hoặc thử một mini game với dữ liệu demo.
                   </p>
@@ -802,12 +802,12 @@ export default function App() {
         <Modal title="Một vòng chơi trong Studio" onClose={() => setHelp(false)}>
           <div className="help-steps">
             <p>
-              <b>01 · Kết nối nguồn</b> Lấy mã riêng của livestream, ghép nối extension trên máy
-              chủ, chọn tab và vùng comment cần ghi.
+              <b>01 · Kết nối nguồn</b> Bấm Collect trong extension trên máy chủ, chọn tab và vùng
+              comment cần ghi.
             </p>
             <p>
-              <b>02 · Theo dõi livestream</b> Chọn phiên, bật thu thập và giữ máy chủ hoạt động. Mọi
-              thiết bị LAN dùng chung dữ liệu.
+              <b>02 · Theo dõi livestream</b> Chọn nguồn Collect để lưu và giữ máy chủ hoạt động.
+              Mọi thiết bị LAN dùng chung dữ liệu.
             </p>
             <p>
               <b>03 · Chọn luật chơi</b> Chọn hai comment mốc cùng tác giả, nhập số cần tìm và chọn
@@ -899,6 +899,9 @@ function StreamListItem({
           </span>
           <small>{s.pageName}</small>
           {s.kind === 'browser' && <small>Video Facebook · {s.facebookId}</small>}
+          {!!s.capturePending && (
+            <small>Đang đồng bộ · {number(s.capturePending)} comment chờ lưu</small>
+          )}
           {s.error && <small className="text-danger">Cần kiểm tra kết nối</small>}
         </span>
         <span className="stream-list-metric">
@@ -1384,7 +1387,7 @@ function Studio({
           </a>
           {editable && live.kind === 'browser' && (
             <button className="button primary" onClick={onConnect}>
-              Mã kết nối
+              Chọn nguồn Collect
             </button>
           )}
           {editable &&
@@ -1399,7 +1402,11 @@ function Studio({
                 }
               >
                 {live.collecting ? <Pause size={16} /> : <Play size={16} />}{' '}
-                {live.collecting ? 'Tạm dừng' : 'Thu thập'}
+                {live.collecting
+                  ? live.kind === 'browser'
+                    ? 'Ngừng lưu'
+                    : 'Tạm dừng'
+                  : 'Thu thập'}
               </button>
             )}
         </div>
@@ -1408,7 +1415,13 @@ function Studio({
         <div className="notice">
           Nguồn trình duyệt · Thời gian là lúc quan sát, không phải lúc gửi. Không cam kết đủ
           comment; danh tính dựa trên link profile. Host/replies có thể chưa xác định. Bắt đầu hoặc
-          tiếp tục từ extension.
+          tiếp tục Collect từ extension, chọn nguồn để lưu trên website.
+        </div>
+      )}
+      {!!live.capturePending && (
+        <div className="notice">
+          Đang đồng bộ: {number(live.capturePending)} comment còn chờ lưu. Kết quả gameshow còn tạm
+          tính.
         </div>
       )}
       {live.error && (
@@ -2427,7 +2440,7 @@ function HistoryView({
 function ImportModal({ onClose, initialUrl }: { onClose: () => void; initialUrl?: string }) {
   return (
     <Modal title="Thêm livestream từ trình duyệt" onClose={onClose}>
-      <CapturePanel initialUrl={initialUrl} />
+      <CapturePanel initialUrl={initialUrl} activeOnly />
     </Modal>
   );
 }
@@ -2838,8 +2851,8 @@ function SettingsView({
                   <h3>Sao lưu database</h3>
                   <p>
                     Bản sao SQLite nhất quán, gồm comment, kết quả và tài khoản. Xem README để khôi
-                    phục khi app đã dừng. Sau restore, đăng nhập lại, ghép nối extension và cấu hình
-                    AI mới.
+                    phục khi app đã dừng. Sau restore, đăng nhập lại, chọn lại nguồn Collect và cấu
+                    hình AI mới.
                   </p>
                 </div>
                 <button

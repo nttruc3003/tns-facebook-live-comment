@@ -3334,3 +3334,22 @@ td small {
 .lotto-called:empty {
   display: none;
 }
+
+.capture-source-card {
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid var(--border, #e3e5ed);
+  border-radius: 12px;
+}
+.capture-source-card p {
+  overflow-wrap: anywhere;
+}
+.capture-source-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.capture-source-heading h3 {
+  margin: 0;
+}

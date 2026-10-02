@@ -73,3 +73,11 @@ hr {
   color: #14532d;
   font-weight: 600;
 }
+
+#runs {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+summary {
+  cursor: pointer;
+}

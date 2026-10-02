@@ -151,10 +151,12 @@ test('v7 log migration keeps comments and marks unfinished logs interrupted afte
   try {
     const stream = seedDemo(db);
     const count = (db.prepare('SELECT count(*) n FROM comments').get() as any).n;
-    db.exec('DROP TABLE ai_call_logs; PRAGMA user_version=7;');
+    db.exec(
+      'DROP TABLE capture_sources; DROP TABLE capture_installations; DROP TABLE ai_call_logs; PRAGMA user_version=7;',
+    );
     db.close();
     db = openStore(directory);
-    assert.equal(db.pragma('user_version', { simple: true }), 8);
+    assert.equal(db.pragma('user_version', { simple: true }), 9);
     assert.equal((db.prepare('SELECT count(*) n FROM comments').get() as any).n, count);
     const pending = new AutofillLog(
       db,

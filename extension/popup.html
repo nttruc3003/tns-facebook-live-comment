@@ -9,38 +9,25 @@
   <body>
     <h1>TNS Live Comments</h1>
     <p id="tab">Đang đọc tab hiện tại…</p>
-    <label
-      >Máy chủ local<input id="server" value="http://localhost:3210" spellcheck="false"
-    /></label>
-    <label
-      >Mã của phiên livestream<input
-        id="code"
-        type="password"
-        autocomplete="off"
-        placeholder="Studio → Livestream → Xem mã"
-    /></label>
-    <button id="pair">Ghép nối</button>
-    <p id="pair-result" class="success" role="status" aria-live="assertive" hidden></p>
+    <button id="collect" class="primary">Collect</button>
+    <p id="status" role="status" aria-live="polite">Đang đọc hàng chờ…</p>
     <p class="note">
-      Mỗi livestream có một mã cố định trong Studio. Dùng lại mã đó để kết nối lại cùng phiên; chỉ
-      đổi mã trong Studio khi cần. Chuyển video thì dùng mã của video mới.
+      Collect chỉ đọc comment hiển thị. Bấm Collect khi bạn có quyền thu thập phù hợp. Giữ tab mở;
+      dữ liệu có thể thiếu hoặc trùng.
     </p>
-    <hr />
-    <label class="consent"
-      ><input id="consent" type="checkbox" /> Tôi có quyền thu thập phù hợp và hiểu comment có thể
-      bị thiếu/trùng.</label
-    >
-    <button id="start" class="primary">Chọn tab này &amp; vùng comment</button>
-    <button id="stop">Dừng ghi</button><button id="retry">Gửi lại dữ liệu đang chờ</button>
-    <button id="export">Xuất hàng chờ ra JSON</button
-    ><button id="clear">Bỏ hàng chờ / kết thúc phiên lỗi</button>
-    <p id="status" role="status">
-      Mở extension bằng biểu tượng TNS trên thanh công cụ Chrome, không mở trực tiếp file
-      popup.html.
-    </p>
+    <details>
+      <summary>Hàng chờ &amp; thiết bị</summary>
+      <label
+        >Tên Chrome này<input id="name" maxlength="100" placeholder="Ví dụ: Chrome – Máy chính"
+      /></label>
+      <button id="rename">Lưu tên</button>
+      <button id="retry">Đồng bộ lại</button>
+      <button id="export">Xuất hàng chờ JSON</button>
+      <p id="runs"></p>
+    </details>
     <p class="note">
-      Cài extension trên cùng máy chạy Studio. Không thu cookie/mật khẩu; chỉ đọc vùng bạn chọn.
-      Đừng đóng tab khi đang ghi. Lịch sử đã lưu xem được từ LAN.
+      Mở website localhost:3210 → Thêm livestream → Chọn &amp; lưu. Không cần nhập mã. Chưa mở
+      server vẫn Collect được.
     </p>
     <script type="module" src="popup.js"></script>
   </body>

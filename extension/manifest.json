@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "TNS Live Comments · Local Capture",
-  "version": "0.4.5",
-  "description": "Ghi comment trong vùng livestream bạn chọn về TNS Live Studio trên cùng máy.",
+  "version": "0.5.0",
+  "description": "Collect comment vào hàng chờ trên máy, chọn nguồn lưu tại TNS Live Studio.",
   "minimum_chrome_version": "120",
   "permissions": ["activeTab", "alarms", "scripting", "storage"],
   "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],

@@ -17,7 +17,7 @@
     captureId = null;
   const shell = document.createElement('div');
   shell.style.cssText =
-    'position:fixed;z-index:2147483647;right:18px;top:18px;width:370px;max-width:90vw;';
+    'position:fixed;z-index:2147483647;left:18px;top:18px;width:370px;max-width:90vw;';
   const shadow = shell.attachShadow({ mode: 'closed' });
   const style = document.createElement('style');
   style.textContent =
@@ -26,7 +26,7 @@
     heading = document.createElement('h3'),
     info = document.createElement('p'),
     note = document.createElement('small');
-  heading.textContent = 'TNS · Chọn vùng bình luận';
+  heading.textContent = 'TNS · Collect';
   info.textContent =
     'Bấm vào một bình luận trong livestream. Extension sẽ đề xuất vùng đọc để bạn kiểm tra trước khi bắt đầu.';
   note.textContent =
@@ -35,9 +35,9 @@
     cancel = document.createElement('button'),
     include = document.createElement('input'),
     label = document.createElement('label');
-  begin.textContent = 'Xác nhận vùng & bắt đầu';
+  begin.textContent = 'Collect vùng đã chọn';
   begin.disabled = true;
-  cancel.textContent = 'Đóng / dừng';
+  cancel.textContent = 'Dừng thu / đóng';
   include.type = 'checkbox';
   include.checked = true;
   label.append(include, document.createTextNode(' Ghi cả comment đang có trong vùng'));
@@ -67,6 +67,23 @@
     shell.remove();
     chrome.runtime.onMessage.removeListener(onMessage);
   }
+  function candidateFor(article) {
+    let candidate = article.parentElement;
+    const fallback = candidate;
+    for (let i = 0; candidate && i < 5; i++, candidate = candidate.parentElement) {
+      if (
+        ['BODY', 'HTML', 'MAIN'].includes(candidate.tagName) ||
+        candidate.getAttribute('role') === 'main'
+      )
+        break;
+      if (candidate.querySelectorAll('[role="article"]').length >= 2) return candidate;
+    }
+    return fallback &&
+      !['BODY', 'HTML', 'MAIN'].includes(fallback.tagName) &&
+      fallback.getAttribute('role') !== 'main'
+      ? fallback
+      : null;
+  }
   function pick(event) {
     if (event.composedPath().includes(shell)) return;
     const article =
@@ -78,15 +95,7 @@
     }
     event.preventDefault();
     event.stopImmediatePropagation();
-    let candidate = article.parentElement;
-    for (let i = 0; candidate && i < 5; i++, candidate = candidate.parentElement) {
-      if (
-        ['BODY', 'HTML', 'MAIN'].includes(candidate.tagName) ||
-        candidate.getAttribute('role') === 'main'
-      )
-        break;
-      if (candidate.querySelectorAll('[role="article"]').length >= 2) break;
-    }
+    const candidate = candidateFor(article);
     if (
       !candidate ||
       ['BODY', 'HTML', 'MAIN'].includes(candidate.tagName) ||
@@ -180,7 +189,8 @@
       captureId = started.captureId;
       document.removeEventListener('click', pick, true);
       active = true;
-      heading.textContent = 'TNS · Đang ghi vùng đã chọn';
+      heading.textContent = 'TNS · Đang Collect';
+      begin.hidden = true;
       label.hidden = true;
       scan();
       if (!include.checked) pending = [];
@@ -195,7 +205,7 @@
   };
   // Stop UI locally immediately. Server also times out without heartbeats.
   cancel.onclick = async () => {
-    if (!active) {
+    if (!active && !pending.length) {
       dispose();
       return;
     }
@@ -212,7 +222,9 @@
         pending.splice(0, batch.length);
       }
       await send('end');
-      stop('Đã dừng. Comment đã nhận được giữ trong Studio.');
+      stop(
+        'Đã dừng thu. Hàng chờ trên máy vẫn được giữ và sẽ lưu khi được chọn trên website 3210.',
+      );
     } catch (e) {
       stop(`${e.message}\nCòn ${pending.length} comment chưa giao; giữ tab này mở.`);
     } finally {
@@ -220,6 +232,11 @@
     }
   };
   function onMessage(m, _sender, respond) {
+    if (m.type === 'ping') respond({ active: active || busy || pending.length > 0 });
+    if (m.type === 'stop-request') {
+      respond({ ok: true });
+      void cancel.onclick();
+    }
     if (m.type === 'halt') {
       stop(m.reason);
       respond({ ok: true });
@@ -228,4 +245,37 @@
   chrome.runtime.onMessage.addListener(onMessage);
   document.addEventListener('click', pick, true);
   globalThis.TNSCapture = { dispose };
+  // Only auto-start one unambiguous cluster of real comment permalinks for this video.
+  // Ambiguous/no-permalink layouts retain the manual sample selection fallback.
+  const candidates = new Set();
+  for (const article of document.querySelectorAll('[role="article"]')) {
+    const parsed = parser.read(article);
+    if (!parsed?.id?.startsWith('fb:')) continue;
+    const candidate = candidateFor(article);
+    if (!candidate) continue;
+    const children = [...candidate.querySelectorAll('[role="article"]')];
+    if (
+      children.length < 2 ||
+      !children.every((child) => {
+        if (!parser.read(child)?.id?.startsWith('fb:')) return false;
+        return [...child.querySelectorAll('a[href]')].some(
+          (a) => parser.video(a.href) === videoId && parser.commentKey([a.href]).id,
+        );
+      })
+    )
+      continue;
+    candidates.add(candidate);
+  }
+  const regions = [...candidates].filter(
+    (c) => ![...candidates].some((other) => other !== c && other.contains(c)),
+  );
+  if (regions.length === 1) {
+    root = regions[0];
+    oldOutline = root.style.outline;
+    root.style.outline = '3px solid #7855ed';
+    void begin.onclick();
+  } else {
+    info.textContent =
+      'Bấm vào một comment mẫu để chọn vùng thu, rồi bấm Collect vùng đã chọn. Chưa có dữ liệu nào được thu.';
+  }
 })();

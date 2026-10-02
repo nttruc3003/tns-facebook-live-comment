@@ -2,6 +2,7 @@ import { z } from 'zod';
 export type Role = 'admin' | 'operator' | 'viewer';
 export type User = { id: string; name: string; username: string; role: Role };
 export type Stream = {
+  capturePending?: number;
   id: string;
   sourceId: string | null;
   facebookId: string | null;

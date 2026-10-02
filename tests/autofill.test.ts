@@ -192,7 +192,7 @@ test('v6 migration preserves existing numbers and adds three empty columns', asy
     const id = `${seedDemo(db)}-comment-0`;
     db.prepare('UPDATE comments SET firstNumber=?,secondNumber=? WHERE id=?').run('05', '27', id);
     db.exec(
-      'ALTER TABLE comments DROP COLUMN thirdNumber; ALTER TABLE comments DROP COLUMN fourthNumber; ALTER TABLE comments DROP COLUMN fifthNumber; ALTER TABLE comments DROP COLUMN aiNumberNote; ALTER TABLE comments DROP COLUMN numbersRevision; DROP TABLE ai_call_logs; PRAGMA user_version=6;',
+      'ALTER TABLE comments DROP COLUMN thirdNumber; ALTER TABLE comments DROP COLUMN fourthNumber; ALTER TABLE comments DROP COLUMN fifthNumber; ALTER TABLE comments DROP COLUMN aiNumberNote; ALTER TABLE comments DROP COLUMN numbersRevision; DROP TABLE capture_sources; DROP TABLE capture_installations; DROP TABLE ai_call_logs; PRAGMA user_version=6;',
     );
     db.close();
     db = openStore(directory);
@@ -201,7 +201,7 @@ test('v6 migration preserves existing numbers and adds three empty columns', asy
       numberFields.map((field) => row[field]),
       ['05', '27', null],
     );
-    assert.equal(db.pragma('user_version', { simple: true }), 8);
+    assert.equal(db.pragma('user_version', { simple: true }), 9);
   } finally {
     db.close();
     await rm(directory, { recursive: true, force: true });
